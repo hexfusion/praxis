@@ -61,6 +61,11 @@ fn validate_health_check_timing(hc: &crate::config::HealthCheckConfig, cluster_n
             "cluster '{cluster_name}': health_check.timeout_ms must be greater than 0"
         )));
     }
+    if !hc.path.starts_with('/') {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': health check path must start with '/'"
+        )));
+    }
     if hc.path.contains('\r') || hc.path.contains('\n') {
         return Err(ProxyError::Config(format!(
             "cluster '{cluster_name}': health_check.path must not contain CR or LF characters"
