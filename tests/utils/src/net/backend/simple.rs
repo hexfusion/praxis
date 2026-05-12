@@ -226,7 +226,7 @@ pub fn start_backend_v6(body: &str) -> u16 {
 /// Handle a single IPv6 TCP connection: read request headers,
 /// write a minimal HTTP 200 response.
 fn handle_v6_connection(mut stream: TcpStream, body: &str) {
-    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
     let mut buf = [0u8; 4096];
     let _bytes = stream.read(&mut buf);
     let response = format!(

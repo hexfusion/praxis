@@ -322,7 +322,7 @@ filter_chains:
             "upstream_ca_file should be accepted"
         );
 
-        std::fs::remove_dir_all(&dir).ok();
+        drop(std::fs::remove_dir_all(&dir));
     }
 
     #[test]

@@ -297,7 +297,11 @@ fn spawn_health_check_tasks(
 // -----------------------------------------------------------------------------
 
 /// Print a fatal error to stderr and exit the process.
-#[allow(clippy::print_stderr, reason = "fatal error output")]
+#[allow(
+    clippy::print_stderr,
+    clippy::exit,
+    reason = "fatal error output before runtime is available"
+)]
 pub fn fatal(err: &dyn std::fmt::Display) -> ! {
     eprintln!("fatal: {err}");
     std::process::exit(1)

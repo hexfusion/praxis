@@ -74,7 +74,7 @@ fn rfc9112_bare_cr_in_header_rejected() {
     let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nX-Bad: foo\rbar\r\nConnection: close\r\n\r\n";
     let raw = {
         let mut stream = TcpStream::connect(proxy.addr()).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
         stream.write_all(request).unwrap();
         let mut buf = String::new();
         let _bytes = stream.read_to_string(&mut buf);

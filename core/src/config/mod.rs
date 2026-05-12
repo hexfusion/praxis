@@ -344,7 +344,7 @@ filter_chains:
         let config = Config::from_file(&path).unwrap();
         assert_eq!(config.listeners.len(), 1, "file-loaded config should have 1 listener");
 
-        std::fs::remove_dir_all(&dir).ok();
+        drop(std::fs::remove_dir_all(&dir));
     }
 
     #[test]

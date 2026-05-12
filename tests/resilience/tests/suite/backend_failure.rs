@@ -234,7 +234,7 @@ fn client_disconnect_during_slow_response_does_not_crash_proxy() {
     let proxy = start_proxy(&config);
 
     let mut stream = TcpStream::connect(proxy.addr()).expect("TCP connect");
-    stream.set_read_timeout(Some(Duration::from_millis(200))).ok();
+    drop(stream.set_read_timeout(Some(Duration::from_millis(200))));
     let request = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     stream.write_all(request.as_bytes()).expect("write request");
     drop(stream);
@@ -281,7 +281,7 @@ fn start_hang_backend() -> u16 {
         for stream in listener.incoming().flatten() {
             std::thread::spawn(move || {
                 let mut s = stream;
-                s.set_read_timeout(Some(Duration::from_secs(30))).ok();
+                drop(s.set_read_timeout(Some(Duration::from_secs(30))));
                 let mut buf = [0u8; 4096];
                 loop {
                     match s.read(&mut buf) {
@@ -303,7 +303,7 @@ fn start_partial_response_backend() -> u16 {
         for stream in listener.incoming().flatten() {
             std::thread::spawn(move || {
                 let mut s = stream;
-                s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                drop(s.set_read_timeout(Some(Duration::from_secs(5))));
                 let mut buf = [0u8; 4096];
                 let _bytes = s.read(&mut buf);
                 let _sent = s.write_all(b"HTTP/1.1 200 OK\r\n");

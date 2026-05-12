@@ -55,8 +55,8 @@ pub fn wait_for_http(addr: &str) {
 
     for _ in 0..500 {
         if let Ok(mut stream) = TcpStream::connect(addr) {
-            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
-            stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+            drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
+            drop(stream.set_write_timeout(Some(Duration::from_secs(2))));
             if stream.write_all(request).is_ok() {
                 let mut buf = [0u8; 16];
                 if let Ok(n) = stream.read(&mut buf)
@@ -84,8 +84,8 @@ pub fn wait_for_http2(addr: &str) {
 
     for _ in 0..500 {
         if let Ok(mut stream) = TcpStream::connect(addr) {
-            stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
-            stream.set_write_timeout(Some(Duration::from_secs(1))).ok();
+            drop(stream.set_read_timeout(Some(Duration::from_secs(1))));
+            drop(stream.set_write_timeout(Some(Duration::from_secs(1))));
             if stream.write_all(PREFACE).is_ok() && stream.write_all(SETTINGS).is_ok() {
                 let mut buf = [0u8; 64];
                 if let Ok(n) = stream.read(&mut buf)

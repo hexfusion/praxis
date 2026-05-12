@@ -332,7 +332,7 @@ async fn h2_get(addr: &str, path: &str, client_config: &Arc<ClientConfig>) -> (u
     while let Some(chunk) = body_stream.data().await {
         let data = chunk.expect("H2 body chunk");
         body.extend_from_slice(&data);
-        body_stream.flow_control().release_capacity(data.len()).ok();
+        drop(body_stream.flow_control().release_capacity(data.len()));
     }
 
     (status, String::from_utf8_lossy(&body).into_owned())
@@ -516,7 +516,7 @@ async fn try_h2_get_inner(addr: &str, path: &str, client_config: &Arc<ClientConf
     while let Some(chunk) = body_stream.data().await {
         let Ok(data) = chunk else { break };
         body.extend_from_slice(&data);
-        body_stream.flow_control().release_capacity(data.len()).ok();
+        drop(body_stream.flow_control().release_capacity(data.len()));
     }
 
     Some((status, String::from_utf8_lossy(&body).into_owned()))

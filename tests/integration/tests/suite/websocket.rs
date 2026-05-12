@@ -46,7 +46,7 @@ async fn websocket_upgrade_succeeds() {
     let Some(echo) = recv_ws(&mut ws).await else { return };
     assert_eq!(echo, Message::Text("world".into()), "multiple messages should work");
 
-    ws.close(None).await.ok();
+    drop(ws.close(None).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -69,7 +69,7 @@ async fn websocket_binary_messages() {
         "binary messages should be echoed correctly"
     );
 
-    ws.close(None).await.ok();
+    drop(ws.close(None).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -96,7 +96,7 @@ async fn websocket_message_ordering_preserved() {
         );
     }
 
-    ws.close(None).await.ok();
+    drop(ws.close(None).await);
 }
 
 #[test]
@@ -234,7 +234,7 @@ async fn websocket_ping_pong_frames() {
         "proxy should forward ping/pong frames, got {reply:?}"
     );
 
-    ws.close(None).await.ok();
+    drop(ws.close(None).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -257,7 +257,7 @@ async fn websocket_large_message() {
         "128KB binary message should echo correctly"
     );
 
-    ws.close(None).await.ok();
+    drop(ws.close(None).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -297,9 +297,9 @@ async fn websocket_multiple_simultaneous_connections() {
         "connection 3 should echo independently"
     );
 
-    ws1.close(None).await.ok();
-    ws2.close(None).await.ok();
-    ws3.close(None).await.ok();
+    drop(ws1.close(None).await);
+    drop(ws2.close(None).await);
+    drop(ws3.close(None).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -356,7 +356,7 @@ async fn websocket_via_header_on_upgrade_response() {
         "Via header should contain proxy pseudonym 'praxis', got: {via_str}"
     );
 
-    ws.close(None).await.ok();
+    drop(ws.close(None).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -395,7 +395,7 @@ filter_chains:
     let url = format!("ws://127.0.0.1:{proxy_port}/");
     let (mut ws, resp) = connect_async(&url).await.expect("first upgrade should succeed");
     assert_eq!(resp.status(), 101, "first upgrade should get 101");
-    ws.close(None).await.ok();
+    drop(ws.close(None).await);
 
     let request = "GET / HTTP/1.1\r\n\
          Host: localhost\r\n\

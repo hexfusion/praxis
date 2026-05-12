@@ -587,7 +587,7 @@ impl StoppableBackend {
                     Ok((mut stream, _)) => {
                         let body = body.clone();
                         std::thread::spawn(move || {
-                            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                            drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
                             let _headers = read_until_headers(&mut stream);
                             let resp = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

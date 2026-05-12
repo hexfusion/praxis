@@ -300,8 +300,8 @@ fn attempt_legacy_tls(addr: &str, version: u16) -> bool {
     let Ok(mut stream) = TcpStream::connect(addr) else {
         return true;
     };
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+    drop(stream.set_read_timeout(Some(Duration::from_secs(2))));
+    drop(stream.set_write_timeout(Some(Duration::from_secs(2))));
 
     if stream.write_all(&client_hello).is_err() {
         return true;

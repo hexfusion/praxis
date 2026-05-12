@@ -542,7 +542,7 @@ mod tests {
         assert_eq!(loaded.runs.len(), 1);
         assert!(loaded.median.is_some(), "loaded results should contain median");
 
-        std::fs::remove_file(&path).ok();
+        drop(std::fs::remove_file(&path));
     }
 
     #[test]

@@ -103,7 +103,7 @@ fn tcp_echo_roundtrip(addr: &str, message: &[u8]) -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
     if stream.write_all(message).is_err() {
         return false;
     }
