@@ -32,6 +32,12 @@ pub(super) fn execute(
         return Ok(None);
     }
 
+    if let Some(ref chunk) = *body {
+        #[allow(clippy::cast_possible_truncation, reason = "chunk length fits u64")]
+        let chunk_len = chunk.len() as u64;
+        ctx.response_body_bytes = ctx.response_body_bytes.saturating_add(chunk_len);
+    }
+
     let caps = pipeline.body_capabilities();
 
     if !caps.needs_response_body {
@@ -42,19 +48,13 @@ pub(super) fn execute(
 
     match ctx.response_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
-            if let Some(ref chunk) = *body {
-                #[allow(clippy::cast_possible_truncation, reason = "chunk length fits u64")]
-                let chunk_len = chunk.len() as u64;
-                ctx.response_body_bytes += chunk_len;
-
-                #[allow(clippy::cast_possible_truncation, reason = "max_bytes fits u64")]
-                let limit = max_bytes as u64;
-                if ctx.response_body_bytes > limit {
-                    return Err(pingora_core::Error::explain(
-                        pingora_core::ErrorType::InternalError,
-                        "response body exceeds maximum size",
-                    ));
-                }
+            #[allow(clippy::cast_possible_truncation, reason = "max_bytes fits u64")]
+            let limit = max_bytes as u64;
+            if ctx.response_body_bytes > limit {
+                return Err(pingora_core::Error::explain(
+                    pingora_core::ErrorType::InternalError,
+                    "response body exceeds maximum size",
+                ));
             }
             return Ok(None);
         },
@@ -171,6 +171,33 @@ mod tests {
         let result = execute(&pipeline, &mut body, true, &mut ctx);
 
         assert_eq!(result.unwrap(), None, "should return None when no body capabilities");
+    }
+
+    #[test]
+    fn response_body_bytes_counted_without_body_capable_filter() {
+        let pipeline = make_pipeline();
+        let mut body = Some(Bytes::from_static(b"hello"));
+        let mut ctx = make_ctx();
+
+        execute(&pipeline, &mut body, true, &mut ctx).unwrap();
+
+        assert_eq!(
+            ctx.response_body_bytes, 5,
+            "bytes must be counted even when no filter declares response-body access"
+        );
+    }
+
+    #[test]
+    fn response_body_bytes_accumulates_across_chunks() {
+        let pipeline = make_pipeline();
+        let mut ctx = make_ctx();
+
+        for chunk in [b"abc".as_slice(), b"de".as_slice(), b"f".as_slice()] {
+            let mut body = Some(Bytes::copy_from_slice(chunk));
+            execute(&pipeline, &mut body, false, &mut ctx).unwrap();
+        }
+
+        assert_eq!(ctx.response_body_bytes, 6, "chunk byte counts must sum");
     }
 
     #[test]

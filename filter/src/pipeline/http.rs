@@ -12,8 +12,8 @@ use super::{
     check_failure_mode,
     filter::PipelineFilter,
     http_utils::{
-        BodyFilterOutcome, accumulate_body_bytes, as_request_body_filter, as_response_body_filter,
-        dispatch_body_result, released_or_continue, run_response_filter, skip_by_response_conditions,
+        BodyFilterOutcome, as_request_body_filter, as_response_body_filter, dispatch_body_result,
+        released_or_continue, run_response_filter, skip_by_response_conditions,
     },
 };
 use crate::{
@@ -116,7 +116,6 @@ impl FilterPipeline {
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         ensure_body_done_indices(ctx, self.filters.len());
-        accumulate_body_bytes(&mut ctx.request_body_bytes, body);
         let mut released = false;
         for (idx, pf) in self.filters.iter().enumerate() {
             if ctx.body_done_indices.get(idx) == Some(&true) {
@@ -161,7 +160,6 @@ impl FilterPipeline {
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         ensure_body_done_indices(ctx, self.filters.len());
-        accumulate_body_bytes(&mut ctx.response_body_bytes, body);
         let mut released = false;
         for (idx, pf) in self.filters.iter().enumerate().rev() {
             if ctx.body_done_indices.get(idx) == Some(&true) {

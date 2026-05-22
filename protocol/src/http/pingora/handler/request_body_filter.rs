@@ -42,6 +42,12 @@ pub(super) async fn execute(
         return Ok(());
     }
 
+    if let Some(ref chunk) = *body {
+        #[allow(clippy::cast_possible_truncation, reason = "chunk length fits u64")]
+        let chunk_len = chunk.len() as u64;
+        ctx.request_body_bytes = ctx.request_body_bytes.saturating_add(chunk_len);
+    }
+
     let caps = pipeline.body_capabilities();
 
     if !caps.needs_request_body {
@@ -52,20 +58,14 @@ pub(super) async fn execute(
 
     match ctx.request_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
-            if let Some(ref chunk) = *body {
-                #[allow(clippy::cast_possible_truncation, reason = "chunk length fits u64")]
-                let chunk_len = chunk.len() as u64;
-                ctx.request_body_bytes += chunk_len;
-
-                #[allow(clippy::cast_possible_truncation, reason = "max_bytes fits u64")]
-                let limit = max_bytes as u64;
-                if ctx.request_body_bytes > limit {
-                    send_rejection(session, Rejection::status(413)).await;
-                    return Err(pingora_core::Error::explain(
-                        pingora_core::ErrorType::HTTPStatus(413),
-                        "request body exceeds maximum size",
-                    ));
-                }
+            #[allow(clippy::cast_possible_truncation, reason = "max_bytes fits u64")]
+            let limit = max_bytes as u64;
+            if ctx.request_body_bytes > limit {
+                send_rejection(session, Rejection::status(413)).await;
+                return Err(pingora_core::Error::explain(
+                    pingora_core::ErrorType::HTTPStatus(413),
+                    "request body exceeds maximum size",
+                ));
             }
             return Ok(());
         },
