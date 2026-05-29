@@ -742,7 +742,10 @@ fn assert_invalid_params_rejection(action: &FilterAction, expected_id: &serde_js
     let FilterAction::Reject(rejection) = action else {
         panic!("expected InvalidParams rejection, got {action:?}");
     };
-    assert_eq!(rejection.status, 400, "InvalidParams rejection should use HTTP 400");
+    assert_eq!(
+        rejection.status, 200,
+        "InvalidParams rejection should use HTTP 200 per JSON-RPC spec"
+    );
 
     let body = rejection
         .body
