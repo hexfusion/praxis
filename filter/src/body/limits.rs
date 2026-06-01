@@ -8,4 +8,4 @@
 // -----------------------------------------------------------------------------
 
 /// Default maximum body size for generic JSON request-body inspection (10 MiB).
-pub(crate) const DEFAULT_JSON_BODY_MAX_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const DEFAULT_JSON_BODY_MAX_BYTES: usize = 10_485_760; // 10 MiB
