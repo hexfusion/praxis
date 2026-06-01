@@ -66,13 +66,6 @@ pub(crate) struct ClassifiedRequest {
 ///
 /// This function is pure: no I/O, no side effects, no mutation of
 /// the input bytes.
-///
-/// ```ignore
-/// let body = br#"{"model":"gpt-4.1","input":"Hello"}"#;
-/// let result = classify_request_body(body);
-/// assert_eq!(result.format.as_str(), "responses");
-/// assert_eq!(result.model.as_deref(), Some("gpt-4.1"));
-/// ```
 pub(crate) fn classify_request_body(body: &[u8]) -> ClassifiedRequest {
     if body.is_empty() {
         return empty_result(AiRequestFormat::NonJson);
