@@ -133,9 +133,8 @@ category:
 ```text
 builtins/
   http/                       HTTP protocol filters
-    ai/                       AI workloads (inference)
     observability/            Access logs, request IDs
-    payload_processing/       Compression, body field extraction
+    payload_processing/       Compression, body field extraction, JSON-RPC
     security/                 CORS, CSRF, forwarded headers, guardrails, IP ACL
     traffic_management/       Router, load balancer, timeout, rate limit, redirect, static response
     transformation/           Header, path rewrite, URL rewrite
@@ -199,7 +198,7 @@ solution is viable.
 - **Header transforms**: `headers`, `forwarded_headers`,
   classifier filters
 - **Routing decisions**: `router` + `load_balancer`,
-  branch chains, `model_to_header`
+  branch chains
 - **Custom logic**: write a native `HttpFilter` — it
   runs in-process with full pipeline context
 
@@ -413,9 +412,8 @@ exceeding `n` bytes receive 413.
 
 This mode is useful for:
 
-- **AI inference proxies**: inspect prompt content for
-  routing, token counting, or content policy before
-  forwarding
+- **API gateways**: inspect request bodies for routing,
+  content policy, or field extraction before forwarding
 - **Security gateways**: scan payloads for malware
   signatures, PII, or injection attacks with early
   rejection

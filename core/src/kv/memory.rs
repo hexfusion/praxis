@@ -302,12 +302,12 @@ mod tests {
     #[test]
     fn lookup_regex() {
         let store = InMemoryKvBackend::new();
-        store.set("model-gpt4", Arc::from("openai"));
-        store.set("model-claude", Arc::from("anthropic"));
+        store.set("model-gamma1", Arc::from("provider-a"));
+        store.set("model-alpha", Arc::from("provider-b"));
 
-        let result = store.lookup("model-gpt\\d", MatchType::Regex).unwrap();
+        let result = store.lookup("model-gamma\\d", MatchType::Regex).unwrap();
         assert!(result.is_some(), "regex lookup should find matching key");
-        assert_eq!(result.unwrap().1.as_ref(), "openai");
+        assert_eq!(result.unwrap().1.as_ref(), "provider-a");
     }
 
     #[test]
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn lookup_regex_anchored() {
         let store = InMemoryKvBackend::new();
-        store.set("model-gpt4", Arc::from("openai"));
+        store.set("model-gamma1", Arc::from("provider-a"));
         let result = store.lookup("^model-", MatchType::Regex).unwrap();
         assert!(result.is_some(), "anchored regex should match");
     }

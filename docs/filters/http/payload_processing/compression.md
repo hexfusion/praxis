@@ -3,7 +3,7 @@
 
 # `compression`
 
-Enables Pingora's built-in response compression when present in a filter chain.
+Successfully parsed JSON-RPC body with the raw JSON value and extracted envelope.
 
 ## Configuration
 

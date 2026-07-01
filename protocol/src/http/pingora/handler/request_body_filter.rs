@@ -24,12 +24,7 @@ const BODY_FALLBACK_LIMIT: usize = 67_108_864; // 64 MiB
 // -----------------------------------------------------------------------------
 
 /// Run body filters on a request body chunk, enforcing size limits.
-#[expect(
-    clippy::large_stack_frames,
-    clippy::too_many_lines,
-    clippy::cognitive_complexity,
-    reason = "body filter dispatch"
-)]
+#[expect(clippy::large_stack_frames, clippy::too_many_lines, reason = "body filter dispatch")]
 pub(super) async fn execute(
     pipeline: &FilterPipeline,
     session: &mut Session,

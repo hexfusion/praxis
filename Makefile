@@ -190,7 +190,6 @@ lint:
 	cargo machete
 	cargo xtask lint-deps
 	cargo xtask lint-example-tests
-	cargo xtask lint-ai-isolation
 	cargo xtask sync-example-readme
 	cargo xtask lint-filter-docs
 

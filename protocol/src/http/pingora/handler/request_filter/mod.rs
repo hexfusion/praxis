@@ -50,11 +50,7 @@ struct PipelineResult {
 ///
 /// Host header validation runs first (before the pipeline) to reject
 /// ambiguous requests early.
-#[expect(
-    clippy::too_many_lines,
-    clippy::cognitive_complexity,
-    reason = "orchestration function"
-)]
+#[expect(clippy::too_many_lines, reason = "orchestration function")]
 #[expect(
     clippy::large_stack_frames,
     reason = "primary request handler with multiple filter stages"

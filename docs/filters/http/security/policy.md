@@ -21,7 +21,7 @@ The referenced YAML is the CPEX policy document — plugins, routes, and identit
 | `config_path` | string | yes | Filesystem path to the CPEX YAML policy document. |
 | `init_timeout_secs` | u64 | no | Maximum time, in seconds, to wait for `PluginManager::initialize` at filter construction. Identity plugins fetch JWKS over HTTPS during init; a reachable-but-unresponsive identity provider would otherwise hang startup or hot-reload indefinitely. On expiry, filter construction returns an error and the server fails fast. 30s is generous for legitimate cold-cache JWKS fetches over the public internet, while short enough that misbehavior is noticed during the deploy. |
 | `max_buffer_bytes` | usize | no | Maximum request/response body bytes buffered in `ReadWrite` mode. `ReadWrite` uses `StreamBuffer` to accumulate the whole body before APL field mutators run; without a cap an oversized payload could exhaust memory. Ignored in `ReadOnly` mode, which streams. The pipeline rejects an unbounded buffer at config load, so this always carries a concrete ceiling. |
-| `require_mcp_metadata` | bool | no | Fail-closed policy gate for misconfigured chains. When `true` (default), `on_request_body` rejects any request that reaches it without `mcp.method` filter-metadata. The metadata is set by praxis's built-in `mcp` filter, so its absence means either (a) the `mcp` filter is missing from the chain, or (b) it is ordered AFTER `policy` instead of before. Either is a misconfiguration that would silently bypass CMF/APL policy. Set to `false` only when intentionally fronting non-MCP traffic through the `policy` filter for identity-only enforcement (legacy behavior). Note: MCP methods that legitimately carry no entity (e.g. `tools/list`, `initialize`, `prompts/list`) still pass — `require_mcp_metadata` only rejects when the metadata is missing entirely. |
+| `require_protocol_metadata` | bool | no | Fail-closed policy gate for misconfigured chains. When `true` (default), `on_request_body` rejects any request that reaches it without `protocol.method` filter-metadata. The metadata is set by the protocol classifier filter (available in the `praxis-ai` package), so its absence means either (a) the protocol classifier filter is missing from the chain, or (b) it is ordered AFTER `policy` instead of before. Either is a misconfiguration that would silently bypass CMF/APL policy. Set to `false` only when intentionally fronting non-classified traffic through the `policy` filter for identity-only enforcement (legacy behavior). Note: JSON-RPC methods that legitimately carry no entity (e.g. `service/list`, `initialize`, `template/list`) still pass — `require_protocol_metadata` only rejects when the metadata is missing entirely. |
 
 ## Example
 
@@ -29,7 +29,7 @@ The referenced YAML is the CPEX policy document — plugins, routes, and identit
 filter: policy
 config_path: /etc/praxis/cpex-policy.yaml
 body_access: read_write       # optional; default read_only
-require_mcp_metadata: true    # optional; default true
+require_protocol_metadata: true    # optional; default true
 init_timeout_secs: 30         # optional; default 30
 max_buffer_bytes: 10485760    # optional; default 10 MiB (read_write only)
 ```

@@ -5,30 +5,6 @@
 
 Built-in filters organized by protocol and category.
 
-## HTTP / AI
-
-| Filter | Feature | Description |
-|--------|---------|-------------|
-| [`a2a`](http/ai/a2a.md) | - | Extracts A2A protocol metadata from JSON-RPC request bodies and promotes method, family, task ID, streaming detection, and version to request headers, filter results, and durable metadata for routing. |
-| [`ai_guardrails`](http/ai/ai_guardrails.md) | `ai-inference` | Calls an external AI guardrail provider to evaluate request (and eventually response) bodies. The provider determines whether content should be passed, blocked, or redacted. |
-| [`anthropic_messages_format`](http/ai/anthropic_messages_format.md) | `ai-inference` | Classifies Anthropic Messages API requests and promotes routing facts to headers, metadata, and filter results. |
-| [`anthropic_messages_protocol`](http/ai/anthropic_messages_protocol.md) | `ai-inference` | Normalizes Anthropic Messages protocol headers for native backends. |
-| [`anthropic_stream_events`](http/ai/anthropic_stream_events.md) | `ai-inference` | Transforms streaming SSE responses between `OpenAI` and Anthropic formats, processing each chunk as it arrives. |
-| [`anthropic_to_openai`](http/ai/anthropic_to_openai.md) | `ai-inference` | Transforms Anthropic Messages API requests to Chat Completions-compatible request bodies and transforms compatible responses back. The filter name refers to the OpenAI Chat Completions wire shape, not the Responses API; non-OpenAI compatible backends are valid targets. |
-| [`anthropic_validate`](http/ai/anthropic_validate.md) | `ai-inference` | Validates Anthropic Messages request bodies for proxy-owned JSON envelope requirements. |
-| [`json_rpc`](http/ai/json_rpc.md) | - | Extracts JSON-RPC 2.0 envelope metadata from request bodies and promotes method, id, and kind to request headers and filter results for routing. |
-| [`mcp`](http/ai/mcp.md) | - | Extracts MCP protocol metadata from JSON-RPC request bodies and promotes method, tool/resource/prompt name, JSON-RPC kind, protocol version, and session presence to request headers/filter results; stores session ID in durable metadata. |
-| [`model_to_header`](http/ai/model_to_header.md) | `ai-inference` | Promotes the JSON `"model"` field from the request body to a request header. |
-| [`openai_conversations`](http/ai/openai_conversations.md) | `ai-inference` | Handles all `/v1/conversations` endpoints locally. |
-| [`openai_response_store`](http/ai/openai_response_store.md) | `ai-inference` | Persists non-streaming Responses API responses to the configured response store backend. |
-| [`openai_responses_format`](http/ai/openai_responses_format.md) | `ai-inference` | Classifies AI API request bodies and promotes routing facts to headers, metadata, and filter results without mutating the body. |
-| [`openai_responses_model_rewrite`](http/ai/openai_responses_model_rewrite.md) | `ai-inference` | Rewrites the `model` field in Responses API request bodies. |
-| [`openai_responses_rehydrate`](http/ai/openai_responses_rehydrate.md) | `ai-inference` | Validates `previous_response_id` by fetching the stored response, confirming its status is `"completed"`, and populating `ResponsesState` with the full conversation history (stored turns + current input). |
-| [`openai_responses_validate`](http/ai/openai_responses_validate.md) | `ai-inference` | Validates and enriches Responses API requests. |
-| [`prompt_enrich`](http/ai/prompt_enrich.md) | `ai-inference` | Injects statically configured messages into the `messages` array of OpenAI-compatible chat completion request bodies. |
-| [`responses_proxy`](http/ai/responses_proxy.md) | `ai-inference` | Rebuilds the request body from `ResponsesState` when present. |
-| [`token_usage_headers`](http/ai/token_usage_headers.md) | - | Injects `Praxis-Token-Input`, `Praxis-Token-Output`, and `Praxis-Token-Total` headers into downstream responses when token usage data is present in [`filter_metadata`]. |
-
 ## HTTP / Observability
 
 | Filter | Feature | Description |
@@ -40,8 +16,9 @@ Built-in filters organized by protocol and category.
 
 | Filter | Feature | Description |
 |--------|---------|-------------|
-| [`compression`](http/payload_processing/compression.md) | - | Enables Pingora's built-in response compression when present in a filter chain. |
+| [`compression`](http/payload_processing/compression.md) | - | Successfully parsed JSON-RPC body with the raw JSON value and extracted envelope. |
 | [`json_body_field`](http/payload_processing/json_body_field.md) | - | Extracts top-level fields from a JSON request body and promotes their values to request headers using [`StreamBuffer`] mode. |
+| [`json_rpc`](http/payload_processing/json_rpc.md) | - | Header configuration for JSON-RPC metadata promotion. |
 
 ## HTTP / Security
 

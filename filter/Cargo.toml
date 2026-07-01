@@ -14,8 +14,7 @@ publish = true
 name = "praxis_filter"
 
 [features]
-default = ["ai-inference"]
-ai-inference = ["dep:secrecy", "dep:sqlx", "dep:tokio"]
+default = []
 ext-proc = ["dep:praxis-proto", "dep:tonic", "dep:prost-wkt-types"]
 cpex-policy-engine = [
     "dep:cpex",
@@ -40,18 +39,12 @@ praxis-proto = { workspace = true, optional = true }
 rand = { workspace = true }
 prost-wkt-types = { workspace = true, optional = true }
 regex = { workspace = true }
-secrecy = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-sqlx = { workspace = true, optional = true }
 thiserror = { workspace = true }
-# Optional, shared by `ai-inference` and `cpex-policy-engine`. The
-# `cpex-policy-engine` feature drives plugin `initialize()` at filter
-# construction (the praxis
-# filter-factory signature is sync, so we block on a single-thread
-# runtime); the time/net features let JWT identity plugins fetch JWKS
-# at init time.
+# Used by `cpex-policy-engine` for plugin `initialize()` at filter
+# construction and JWT identity plugins that fetch JWKS at init time.
 tokio = { workspace = true, optional = true, features = ["rt", "sync", "time", "net"] }
 tonic = { workspace = true, optional = true }
 tracing = { workspace = true }

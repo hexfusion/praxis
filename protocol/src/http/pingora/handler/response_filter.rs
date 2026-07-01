@@ -16,9 +16,10 @@ use super::super::{context::PingoraRequestCtx, convert::response_header_from_pin
 /// Run the response-phase pipeline and sync header changes to Pingora.
 ///
 /// Strips [RFC 9110] hop-by-hop headers and reserved internal
-/// routing headers (`x-praxis-*`, `x-mcp-*`, `x-a2a-*`) from the
-/// upstream response before the filter pipeline sees them, ensuring
-/// proxy-internal metadata is never forwarded to the client.
+/// routing headers (`x-praxis-*` and AI extension prefixes) from
+/// the upstream response before the filter pipeline sees them,
+/// ensuring proxy-internal metadata is never forwarded to the
+/// client.
 ///
 /// [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 pub(super) async fn execute(

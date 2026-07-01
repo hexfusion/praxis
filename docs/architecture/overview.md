@@ -7,7 +7,7 @@
 **Secure by default.** Security is a primary design goal.
 
 **Composable.** Everything is a filter. Cluster routing,
-load balancing, rate limiting, AI model selection: all
+load balancing, rate limiting, body-based routing: all
 filters, all using the same traits, all assembled into
 pipelines through named chains.
 
@@ -27,8 +27,6 @@ compose a bespoke proxy server from the same primitives.
 - **Ingress**: Reverse proxy, API gateway, edge proxy
 - **Egress**: Outbound proxy, service-to-service
 - **East/West**: Sidecar or converged proxy for service mesh
-- **AI Inference**: Proxy for AI inference workloads
-- **AI Agents**: Proxy for AI agents
 - **Security Gateway**: Guardrails, Network Policy
 
 ## System Architecture

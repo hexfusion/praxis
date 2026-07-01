@@ -567,7 +567,6 @@ by category:
 
 | Directory | Contents |
 | ----------- | ---------- |
-| `ai` | AI inference model-to-header routing |
 | `traffic-management` | Router, load balancer, timeouts, static responses, redirects, rate limiting, health checks |
 | `payload-processing` | Body processing: compression, field extraction, stream buffering, size limits |
 | `security` | Forwarded headers, IP ACL, guardrails, CORS, downstream read timeout |

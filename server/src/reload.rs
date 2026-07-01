@@ -34,7 +34,6 @@ use crate::pipelines::resolve_pipelines;
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
-    clippy::cognitive_complexity,
     reason = "orchestration function"
 )]
 pub(crate) fn reload_pipelines(
@@ -145,7 +144,6 @@ fn log_restart_required_changes(old: &Config, new: &Config) {
 }
 
 /// Detect listener additions, removals, and address rebinds.
-#[expect(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
 fn detect_listener_topology_changes(old: &Config, new: &Config) {
     let old_names: std::collections::HashSet<&str> = old.listeners.iter().map(|l| l.name.as_str()).collect();
     let new_names: std::collections::HashSet<&str> = new.listeners.iter().map(|l| l.name.as_str()).collect();

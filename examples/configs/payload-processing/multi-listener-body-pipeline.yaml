@@ -67,13 +67,13 @@ filter_chains:
         routes:
           - path_prefix: "/"
             headers:
-              x-model: "claude-sonnet-4-5"
-            cluster: claude_sonnet
+              x-model: "model-alpha-1"
+            cluster: alpha_cluster
           - path_prefix: "/"
             cluster: default
       - filter: load_balancer
         clusters:
-          - name: claude_sonnet
+          - name: alpha_cluster
             endpoints:
               - "127.0.0.1:3001"
           - name: default

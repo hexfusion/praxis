@@ -641,8 +641,7 @@ fn apply_body_limits_no_limits_leaves_stream_mode() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
-        #[cfg(feature = "ai-inference")]
-        response_stores: None,
+        pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline.apply_body_limits(None, None, false).unwrap();
@@ -677,8 +676,7 @@ fn apply_body_limits_converts_default_stream_to_size_limit() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
-        #[cfg(feature = "ai-inference")]
-        response_stores: None,
+        pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline
@@ -722,8 +720,7 @@ fn apply_body_limits_preserves_filter_declared_stream() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
-        #[cfg(feature = "ai-inference")]
-        response_stores: None,
+        pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline
@@ -1298,8 +1295,7 @@ fn apply_body_limits_default_stream_becomes_size_limit() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
-        #[cfg(feature = "ai-inference")]
-        response_stores: None,
+        pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline.apply_body_limits(Some(4096), Some(8192), false).unwrap();
@@ -1327,8 +1323,7 @@ fn apply_body_limits_filter_stricter_than_config() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
-        #[cfg(feature = "ai-inference")]
-        response_stores: None,
+        pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline.apply_body_limits(Some(1000), None, false).unwrap();
@@ -1353,8 +1348,7 @@ fn apply_body_limits_config_stricter_than_filter() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
-        #[cfg(feature = "ai-inference")]
-        response_stores: None,
+        pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline.apply_body_limits(Some(1000), None, false).unwrap();
@@ -1379,8 +1373,7 @@ fn apply_body_limits_rejects_unbounded_stream_buffer() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
-        #[cfg(feature = "ai-inference")]
-        response_stores: None,
+        pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     let err = pipeline.apply_body_limits(None, None, false).unwrap_err();
@@ -1404,8 +1397,7 @@ fn apply_body_limits_clamps_unbounded_stream_buffer_with_override() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
-        #[cfg(feature = "ai-inference")]
-        response_stores: None,
+        pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline
@@ -1625,8 +1617,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
-        #[cfg(feature = "ai-inference")]
-        response_stores: None,
+        pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
 
@@ -1674,8 +1665,7 @@ async fn all_executed_filters_run_on_response() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
-        #[cfg(feature = "ai-inference")]
-        response_stores: None,
+        pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
 
@@ -1730,8 +1720,7 @@ async fn skipped_filter_skips_its_branches() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
-        #[cfg(feature = "ai-inference")]
-        response_stores: None,
+        pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
 
@@ -2783,8 +2772,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
-        #[cfg(feature = "ai-inference")]
-        response_stores: None,
+        pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }
 }
@@ -2807,8 +2795,7 @@ fn make_pipeline_with_conditions(
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
-        #[cfg(feature = "ai-inference")]
-        response_stores: None,
+        pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }
 }
@@ -2831,8 +2818,7 @@ fn make_pipeline_with_response_conditions(
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
-        #[cfg(feature = "ai-inference")]
-        response_stores: None,
+        pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }
 }
@@ -3256,26 +3242,58 @@ fn identity_none_after_response_body_error_closed() {
     );
 }
 
-#[cfg(feature = "ai-inference")]
 #[test]
-fn pipeline_auto_creates_response_stores() {
-    let pipeline = FilterPipeline::build(&mut [], &FilterRegistry::with_builtins()).unwrap();
-    assert!(
-        pipeline.response_stores().is_some(),
-        "pipeline should auto-create response stores during build"
-    );
+fn pipeline_extension_is_injected_into_request_extensions() {
+    use crate::{PipelineExtension, RequestExtensions};
+
+    #[derive(Clone)]
+    struct TestExtension(u32);
+
+    impl PipelineExtension for TestExtension {
+        fn prepare(&self, extensions: &mut RequestExtensions) {
+            extensions.insert(self.clone());
+        }
+    }
+
+    let mut pipeline = FilterPipeline::build(&mut [], &FilterRegistry::with_builtins()).unwrap();
+    pipeline.add_pipeline_extension(Box::new(TestExtension(42)));
+
+    let mut ext = RequestExtensions::new();
+    pipeline.prepare_extensions(&mut ext);
+
+    let val = ext.get::<TestExtension>();
+    assert!(val.is_some(), "extension should be present after prepare");
+    assert_eq!(val.unwrap().0, 42, "extension value should match");
 }
 
-#[cfg(feature = "ai-inference")]
 #[test]
-fn separately_built_pipelines_have_distinct_response_stores() {
-    let registry = FilterRegistry::with_builtins();
-    let a = FilterPipeline::build(&mut [], &registry).unwrap();
-    let b = FilterPipeline::build(&mut [], &registry).unwrap();
-    let stores_a = a.response_stores().expect("stores present");
-    let stores_b = b.response_stores().expect("stores present");
-    assert!(
-        !stores_a.shares_storage_with(stores_b),
-        "each pipeline build should create an independent response store registry"
-    );
+fn multiple_pipeline_extensions_are_all_injected() {
+    use crate::{PipelineExtension, RequestExtensions};
+
+    #[derive(Clone)]
+    struct ExtA(u32);
+    #[derive(Clone)]
+    struct ExtB(String);
+
+    impl PipelineExtension for ExtA {
+        fn prepare(&self, extensions: &mut RequestExtensions) {
+            extensions.insert(self.clone());
+        }
+    }
+
+    impl PipelineExtension for ExtB {
+        fn prepare(&self, extensions: &mut RequestExtensions) {
+            extensions.insert(self.clone());
+        }
+    }
+
+    let mut pipeline = FilterPipeline::build(&mut [], &FilterRegistry::with_builtins()).unwrap();
+    pipeline.add_pipeline_extension(Box::new(ExtA(1)));
+    pipeline.add_pipeline_extension(Box::new(ExtB("hello".to_owned())));
+
+    let mut ext = RequestExtensions::new();
+    pipeline.prepare_extensions(&mut ext);
+
+    assert_eq!(ext.get::<ExtA>().unwrap().0, 1, "ExtA should be injected");
+    assert_eq!(ext.get::<ExtB>().unwrap().0, "hello", "ExtB should be injected");
 }

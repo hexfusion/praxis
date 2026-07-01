@@ -136,20 +136,14 @@ praxis-filter                   Filter pipeline engine
 │   └── tests                   Pipeline unit tests
 └── builtins/                   Built-in filter implementations
     ├── http/                   HTTP protocol filters
-    │   ├── ai/                 AI filters for HTTP workloads
-    │   │   ├── agentic/        Agentic protocol classifiers
-    │   │   │   ├── json_rpc    JSON-RPC 2.0 envelope parsing and metadata extraction
-    │   │   │   └── mcp         MCP protocol classifier and metadata extraction
-    │   │   ├── inference/      Model routing and prompt enrichment
-    │   │   │   └── model_to_header  Extract model field, promote to header
-    │   │   └── prompt_enrich   Inject messages into chat completion bodies
     │   ├── net                 Shared IP utilities (IPv4-mapped normalization)
     │   ├── observability/
     │   │   ├── access_log      Structured JSON request/response logging
     │   │   └── request_id      Correlation ID generation/propagation
     │   ├── payload_processing/
     │   │   ├── compression     Gzip/brotli/zstd response compression
-    │   │   └── json_body_field Extract JSON field, promote to header
+    │   │   ├── json_body_field Extract JSON field, promote to header
+    │   │   └── json_rpc        JSON-RPC 2.0 envelope parsing and metadata extraction
     │   ├── security/
     │   │   ├── cors            CORS preflight handling, origin validation
     │   │   ├── credential_injection  Per-cluster API key injection

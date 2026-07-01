@@ -14,7 +14,7 @@
 #   # Body inspected, X-Model extracted:
 #   curl -X POST http://localhost:8080/v1/chat/completions \
 #     -H "Content-Type: application/json" \
-#     -d '{"model": "mistral-large-latest", "messages": [...]}'
+#     -d '{"model": "model-beta-1", "messages": [...]}'
 #
 #   # Body NOT inspected, forwarded directly:
 #   curl http://localhost:8080/healthz
@@ -42,15 +42,15 @@ filter_chains:
         routes:
           - path_prefix: "/v1/"
             headers:
-              x-model: "mistral-large-latest"
-            cluster: mistral_large
+              x-model: "model-beta-1"
+            cluster: beta_cluster
           - path_prefix: "/v1/"
             cluster: default-inference
           - path_prefix: "/"
             cluster: static
       - filter: load_balancer
         clusters:
-          - name: mistral_large
+          - name: beta_cluster
             endpoints:
               - "10.0.1.1:8080"
           - name: default-inference

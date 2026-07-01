@@ -19,6 +19,7 @@ Full documentation index: [docs/README.md](docs/README.md)
 
 - [Configuration](docs/operating/configuration.md)
 - [Features](docs/features.md)
+- [AI Features](https://github.com/praxis-proxy/ai)
 - [Filters](docs/filters/README.md)
 - [Extensions](docs/filters/extensions.md)
 - [TLS](docs/operating/tls.md)

@@ -8,8 +8,6 @@ readme = "../../README.md"
 publish = false
 
 [features]
-default = ["ai-inference"]
-ai-inference = ["praxis-filter/ai-inference", "praxis-test-utils/ai-inference"]
 cpex-policy-engine = ["praxis-filter/cpex-policy-engine"]
 no-mac-cert-rotation-tests = [] # We use this to disable testing cert rotation on macOS
 
@@ -34,7 +32,6 @@ rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-sqlx = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
 tokio-rustls = { workspace = true }

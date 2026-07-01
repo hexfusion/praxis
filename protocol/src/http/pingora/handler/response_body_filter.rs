@@ -25,11 +25,7 @@ const BODY_FALLBACK_LIMIT: usize = 67_108_864; // 64 MiB
 // -----------------------------------------------------------------------------
 
 /// Run body filters on a response body chunk (synchronous; Pingora constraint).
-#[expect(
-    clippy::too_many_lines,
-    clippy::cognitive_complexity,
-    reason = "body filter dispatch"
-)]
+#[expect(clippy::too_many_lines, reason = "body filter dispatch")]
 pub(super) fn execute(
     pipeline: &FilterPipeline,
     body: &mut Option<Bytes>,
