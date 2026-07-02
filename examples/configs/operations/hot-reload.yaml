@@ -58,4 +58,5 @@ filter_chains:
         status: 200
         body: '{"message": "hello from praxis"}'
         headers:
-          content-type: "application/json"
+          - name: content-type
+            value: "application/json"
