@@ -52,6 +52,6 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 chrono = { workspace = true }
-jsonwebtoken = "10"
+jsonwebtoken = "10.4.0"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
