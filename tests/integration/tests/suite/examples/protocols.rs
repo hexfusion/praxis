@@ -32,7 +32,7 @@ fn tcp_round_robin_example_distributes_traffic() {
             ("127.0.0.1:15434", port_c),
         ]),
     );
-    let _proxy = start_tcp_proxy(config, proxy_port);
+    let _proxy = start_tcp_proxy(&config, proxy_port);
 
     let total = 30_u32;
     let mut counts: HashMap<String, u32> = HashMap::new();
@@ -67,7 +67,7 @@ fn tcp_least_connections_example_forwards_correctly() {
             ("127.0.0.1:15434", port_c),
         ]),
     );
-    let _proxy = start_tcp_proxy(config, proxy_port);
+    let _proxy = start_tcp_proxy(&config, proxy_port);
 
     for _ in 0..5 {
         let resp = tcp_send_recv(&format!("127.0.0.1:{proxy_port}"), b"data");
@@ -98,7 +98,7 @@ fn tcp_consistent_hash_example_maintains_affinity() {
             ("127.0.0.1:16381", port_c),
         ]),
     );
-    let _proxy = start_tcp_proxy(config, proxy_port);
+    let _proxy = start_tcp_proxy(&config, proxy_port);
 
     let mut first_backend = String::new();
     for i in 0..5 {
@@ -119,8 +119,8 @@ fn tcp_consistent_hash_example_maintains_affinity() {
 // ---------------------------------------------------------------------------
 
 /// Start a full Praxis TCP proxy in a background thread and wait for readiness.
-fn start_tcp_proxy(config: praxis_core::config::Config, proxy_port: u16) -> ProxyGuard {
-    let guard = start_full_proxy(&config);
+fn start_tcp_proxy(config: &praxis_core::config::Config, proxy_port: u16) -> ProxyGuard {
+    let guard = start_full_proxy(config);
     wait_for_tcp(&format!("127.0.0.1:{proxy_port}"));
     guard
 }
