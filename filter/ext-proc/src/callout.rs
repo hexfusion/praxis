@@ -54,6 +54,10 @@ pub(crate) enum CalloutError {
 /// Opens a `Process` stream, sends a `RequestHeaders` message, and
 /// waits for one response within `timeout`. Returns [`FilterAction`]
 /// indicating whether the pipeline should continue or reject.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "kept for focused request-header callout tests")
+)]
 pub(crate) async fn process_request_headers(
     channel: Channel,
     target: &str,
@@ -75,6 +79,10 @@ pub(crate) async fn process_request_headers(
 ///
 /// Same pattern as [`process_request_headers`] but wraps
 /// `ResponseHeaders` and operates during the response phase.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "kept for focused response-header callout tests")
+)]
 pub(crate) async fn process_response_headers(
     channel: Channel,
     target: &str,

@@ -85,7 +85,8 @@ const DEFAULT_MESSAGE_TIMEOUT_MS: u64 = 200;
 /// Default HTTP status code returned on processor errors.
 const DEFAULT_STATUS_ON_ERROR: u16 = 500;
 
-/// Default deferred close timeout in milliseconds (observability mode).
+/// Default deferred close timeout in milliseconds for best-effort
+/// trailing stream cleanup.
 const DEFAULT_DEFERRED_CLOSE_TIMEOUT_MS: u64 = 5000;
 
 /// Default lifecycle timeout in milliseconds for coalesced drain.
@@ -187,8 +188,9 @@ struct ExtProcConfig {
     #[serde(default)]
     allowed_override_modes: Vec<ProcessingModeConfig>,
 
-    /// Timeout in milliseconds for deferred gRPC stream closure in
-    /// observability mode. Default: 5000.
+    /// Best-effort timeout in milliseconds for trailing gRPC stream
+    /// cleanup after the expected processor response is consumed.
+    /// Zero skips cleanup entirely. Default: 5000.
     #[serde(default = "default_deferred_close_timeout_ms")]
     deferred_close_timeout_ms: u64,
 
@@ -518,13 +520,6 @@ fn validate_core_fields(cfg: &ExtProcConfig) -> Result<(), FilterError> {
         let msg = cfg.message_timeout_ms;
         return Err(format!("ext_proc: lifecycle_timeout_ms ({lc}) must be >= message_timeout_ms ({msg})").into());
     }
-    if cfg.deferred_close_timeout_ms > 0 && cfg.deferred_close_timeout_ms < cfg.message_timeout_ms {
-        let close = cfg.deferred_close_timeout_ms;
-        let msg = cfg.message_timeout_ms;
-        return Err(
-            format!("ext_proc: deferred_close_timeout_ms ({close}) must be >= message_timeout_ms ({msg})").into(),
-        );
-    }
     if let Some(max) = cfg.max_message_timeout_ms {
         if max == 0 {
             return Err("ext_proc: max_message_timeout_ms must be greater than 0".into());
@@ -545,26 +540,11 @@ fn validate_core_fields(cfg: &ExtProcConfig) -> Result<(), FilterError> {
 /// existing `none` default. Other body modes (`streamed`, `buffered`,
 /// `buffered_partial`) remain unsupported.
 ///
-/// For the partial request-routing milestone, full-duplex mode
-/// requires `response_header_mode: skip` and rejects
-/// `request_trailer_mode: send` because Pingora has no
-/// request-trailer hooks.
-#[expect(
-    clippy::too_many_lines,
-    reason = "sequential mode validation with full-duplex contract"
-)]
+/// Request and response trailers remain unsupported because Pingora
+/// has no request-trailer hooks in this integration path.
 fn validate_processing_mode(pm: ProcessingModeConfig) -> Result<(), FilterError> {
     if pm.request_header_mode == HeaderSendMode::Skip {
         return Err("ext_proc: request_header_mode 'skip' is not yet supported".into());
-    }
-    if pm.request_body_mode.is_full_duplex() {
-        if pm.response_header_mode == HeaderSendMode::Send {
-            return Err(
-                "ext_proc: full-duplex request mode requires response_header_mode 'skip' until response lifecycle is implemented".into()
-            );
-        }
-    } else if pm.response_header_mode == HeaderSendMode::Skip {
-        return Err("ext_proc: response_header_mode 'skip' is not yet supported".into());
     }
     if !matches!(
         pm.request_body_mode,
@@ -636,6 +616,11 @@ pub struct ExtProcFilter {
     /// Upper bound for processor-requested timeout overrides.
     max_message_timeout: Option<Duration>,
 
+    /// Best-effort timeout for trailing stream cleanup after the
+    /// expected processor response has been consumed. Zero skips
+    /// the drain entirely.
+    deferred_close_timeout: Duration,
+
     /// Bounded lifecycle timeout for coalesced drain at request
     /// body EOS. Separate from per-message timeout.
     lifecycle_timeout: Duration,
@@ -645,6 +630,9 @@ pub struct ExtProcFilter {
 
     /// How the response body is forwarded to the processor.
     response_body_mode: BodySendMode,
+
+    /// Whether response headers are forwarded to the processor.
+    response_header_mode: HeaderSendMode,
 
     /// HTTP status code returned on processor errors.
     status_on_error: u16,
@@ -659,6 +647,7 @@ impl std::fmt::Debug for ExtProcFilter {
             .field("target", &self.target)
             .field("message_timeout", &self.message_timeout)
             .field("request_body_mode", &self.request_body_mode)
+            .field("response_header_mode", &self.response_header_mode)
             .field("status_on_error", &self.status_on_error)
             .finish_non_exhaustive()
     }
@@ -688,6 +677,7 @@ impl ExtProcFilter {
         let message_timeout = Duration::from_millis(cfg.message_timeout_ms);
 
         Ok(Box::new(Self {
+            deferred_close_timeout: Duration::from_millis(cfg.deferred_close_timeout_ms),
             endpoint,
             lazy_channel: std::sync::OnceLock::new(),
             lifecycle_timeout: Duration::from_millis(cfg.lifecycle_timeout_ms),
@@ -695,6 +685,7 @@ impl ExtProcFilter {
             message_timeout,
             request_body_mode: cfg.processing_mode.request_body_mode,
             response_body_mode: cfg.processing_mode.response_body_mode,
+            response_header_mode: cfg.processing_mode.response_header_mode,
             status_on_error: cfg.status_on_error,
             target: cfg.target,
         }))
@@ -752,6 +743,27 @@ impl ExtProcFilter {
         }
     }
 
+    /// Best-effort trailing cleanup for non-lifecycle exchange paths.
+    ///
+    /// Calls `finish_sending()` then drains remaining server data
+    /// within `deferred_close_timeout`. If the timeout is zero or
+    /// the drain times out, the exchange is dropped without waiting.
+    async fn bounded_cleanup(&self, exchange: &mut ExtProcExchange) {
+        exchange.finish_sending();
+        if self.deferred_close_timeout.is_zero() {
+            return;
+        }
+        if tokio::time::timeout(self.deferred_close_timeout, exchange.drain_trailing())
+            .await
+            .is_err()
+        {
+            tracing::debug!(
+                target = %self.target,
+                "ext_proc: deferred close timeout during trailing drain"
+            );
+        }
+    }
+
     /// Ensure the per-request exchange is open and request headers
     /// have been sent. Idempotent — returns immediately if headers
     /// were already sent.
@@ -774,10 +786,70 @@ impl ExtProcFilter {
         let state = ExtProcState {
             exchange,
             headers_sent: true,
+            request_phase_complete: false,
         };
 
         ctx.insert_filter_state(state);
         Ok(())
+    }
+
+    /// Send request headers and wait for the matching processor response.
+    async fn process_request_headers_on_exchange(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<FilterAction, FilterError> {
+        let mut state = self.open_and_send_request_headers(ctx).await?;
+        let result = Self::drain_header_response(&mut state, ctx).await;
+
+        self.complete_request_header_processing(state, ctx, result).await
+    }
+
+    /// Open an exchange and send request headers as the first message.
+    async fn open_and_send_request_headers(&self, ctx: &HttpFilterContext<'_>) -> Result<ExtProcState, FilterError> {
+        let headers = mutations::request_to_proto_headers(ctx);
+        let headers_request = processing_request::Request::RequestHeaders(headers);
+
+        let mut state = ExtProcState {
+            exchange: ExtProcExchange::open(self.channel(), &self.exchange_config()),
+            headers_sent: false,
+            request_phase_complete: false,
+        };
+        tokio::time::timeout(self.message_timeout, state.exchange.send(headers_request))
+            .await
+            .map_err(|_elapsed| -> FilterError { "ext_proc: message timeout during request headers".into() })?
+            .map_err(Self::exchange_err)?;
+        state.headers_sent = true;
+
+        Ok(state)
+    }
+
+    /// Store, close, or fail the exchange after request-header processing.
+    async fn complete_request_header_processing(
+        &self,
+        mut state: ExtProcState,
+        ctx: &mut HttpFilterContext<'_>,
+        result: Result<Option<FilterAction>, FilterError>,
+    ) -> Result<FilterAction, FilterError> {
+        match result {
+            Ok(Some(action)) => {
+                self.bounded_cleanup(&mut state.exchange).await;
+                Ok(action)
+            },
+            Ok(None) if self.response_header_mode == HeaderSendMode::Send => {
+                state.request_phase_complete = true;
+                ctx.insert_filter_state(state);
+                Ok(FilterAction::Continue)
+            },
+            Ok(None) => {
+                state.request_phase_complete = true;
+                self.bounded_cleanup(&mut state.exchange).await;
+                Ok(FilterAction::Continue)
+            },
+            Err(e) => {
+                state.exchange.finish_sending();
+                Err(e)
+            },
+        }
     }
 
     /// Drain the exchange after request body EOS: receive the
@@ -807,10 +879,12 @@ impl ExtProcFilter {
             .remove_filter_state::<ExtProcState>()
             .ok_or_else(|| -> FilterError { "ext_proc: missing exchange state during drain".into() })?;
 
-        let result = Self::drain_exchange_inner(&mut state, ctx, body).await;
+        let finish_after_request = self.response_header_mode == HeaderSendMode::Skip;
+        let result = Self::drain_exchange_inner(&mut state, ctx, body, finish_after_request).await;
 
-        // Reinsert the exchange for potential later phases.
-        ctx.insert_filter_state(state);
+        if !finish_after_request && matches!(result, Ok(FilterAction::Continue)) {
+            ctx.insert_filter_state(state);
+        }
 
         result
     }
@@ -820,6 +894,7 @@ impl ExtProcFilter {
         state: &mut ExtProcState,
         ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
+        finish_after_request: bool,
     ) -> Result<FilterAction, FilterError> {
         if let Some(action) = Self::drain_header_response(state, ctx).await? {
             state.exchange.finish_sending();
@@ -828,8 +903,12 @@ impl ExtProcFilter {
         }
 
         let result = Self::drain_body_responses(state, ctx, body).await;
-        state.exchange.finish_sending();
-        state.exchange.drain_trailing().await;
+        if finish_after_request || !matches!(result, Ok(FilterAction::Continue)) {
+            state.exchange.finish_sending();
+            state.exchange.drain_trailing().await;
+        } else {
+            state.request_phase_complete = true;
+        }
         result
     }
 
@@ -921,6 +1000,68 @@ impl ExtProcFilter {
         }
         Ok(FilterAction::Continue)
     }
+
+    /// Send response headers on the existing exchange and apply the response.
+    async fn process_response_headers_on_exchange(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<FilterAction, FilterError> {
+        let mut state = ctx
+            .remove_filter_state::<ExtProcState>()
+            .ok_or_else(|| -> FilterError { "ext_proc: missing exchange state during response headers".into() })?;
+
+        let result = self.process_response_headers_inner(&mut state, ctx).await;
+        if result.is_ok() {
+            self.bounded_cleanup(&mut state.exchange).await;
+        } else {
+            state.exchange.finish_sending();
+        }
+        result
+    }
+
+    /// Inner response-header processing using an owned [`ExtProcState`].
+    ///
+    /// Send is bounded by `message_timeout`. Receive uses the
+    /// exchange's active-processing deadline, which supports
+    /// `override_message_timeout` from the processor.
+    #[expect(clippy::too_many_lines, reason = "send + receive + classification match")]
+    async fn process_response_headers_inner(
+        &self,
+        state: &mut ExtProcState,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<FilterAction, FilterError> {
+        if !state.request_phase_complete {
+            return Err("ext_proc: response headers reached before request phase completed".into());
+        }
+
+        let headers = mutations::response_to_proto_headers(ctx);
+        let timeout = self.message_timeout;
+        tokio::time::timeout(
+            timeout,
+            state
+                .exchange
+                .send(processing_request::Request::ResponseHeaders(headers)),
+        )
+        .await
+        .map_err(|_elapsed| -> FilterError { "ext_proc: message timeout sending response headers".into() })?
+        .map_err(Self::exchange_err)?;
+
+        let event = state.exchange.receive().await.map_err(Self::exchange_err)?;
+        match event {
+            ExchangeEvent::ResponseHeaders { response, metadata } => {
+                apply_dynamic_metadata(metadata, ctx);
+                mutations::apply_headers_response(&response, ctx, Phase::Response);
+                Ok(FilterAction::Continue)
+            },
+            ExchangeEvent::Immediate { response, metadata } => {
+                apply_dynamic_metadata(metadata, ctx);
+                Ok(mutations::immediate_to_rejection(&response))
+            },
+            other => {
+                Err(format!("ext_proc: expected ResponseHeaders or Immediate during response, got {other:?}").into())
+            },
+        }
+    }
 }
 
 /// Resolve the maximum bytes allowed for coalesced processor body
@@ -947,6 +1088,9 @@ struct ExtProcState {
 
     /// Whether request headers have been committed to the exchange.
     headers_sent: bool,
+
+    /// Whether request-phase processor responses have been consumed.
+    request_phase_complete: bool,
 }
 
 // -----------------------------------------------------------------------------
@@ -1042,17 +1186,7 @@ impl HttpFilter for ExtProcFilter {
             return Ok(self.call_or_reject(result.map(|()| FilterAction::Continue)));
         }
 
-        // Header-only mode: use the existing one-shot callout.
-        Ok(self.call_or_reject(
-            callout::process_request_headers(
-                self.channel(),
-                &self.target,
-                self.message_timeout,
-                self.max_message_timeout,
-                ctx,
-            )
-            .await,
-        ))
+        Ok(self.call_or_reject(self.process_request_headers_on_exchange(ctx).await))
     }
 
     async fn on_request_body(
@@ -1145,19 +1279,20 @@ impl HttpFilter for ExtProcFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        if self.request_body_mode.is_full_duplex() {
+        if self.response_header_mode == HeaderSendMode::Skip {
             return Ok(FilterAction::Continue);
         }
-        Ok(self.call_or_reject(
-            callout::process_response_headers(
-                self.channel(),
-                &self.target,
-                self.message_timeout,
-                self.max_message_timeout,
-                ctx,
-            )
-            .await,
-        ))
+
+        if ctx.get_filter_state::<ExtProcState>().is_some() {
+            return Ok(self.call_or_reject(self.process_response_headers_on_exchange(ctx).await));
+        }
+
+        // Fail closed: response_header_mode is send but no exchange
+        // survived the request phase. This indicates a lifecycle bug
+        // or request-phase error that consumed the exchange.
+        Ok(self.call_or_reject(Err(
+            "ext_proc: response_header_mode is send but no exchange state from request phase".into(),
+        )))
     }
 }
 

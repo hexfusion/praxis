@@ -158,7 +158,6 @@ pub(crate) enum ExchangeEvent {
         metadata: Option<prost_wkt_types::Struct>,
     },
     /// Response headers response.
-    #[expect(dead_code, reason = "classified by receive; consumed in response-phase processing")]
     ResponseHeaders {
         /// Processor response payload.
         response: HeadersResponse,
@@ -438,7 +437,6 @@ impl ExtProcExchange {
     /// [`send`]: Self::send
     /// [`receive`]: Self::receive
     /// [`open_with_request_headers`]: Self::open_with_request_headers
-    #[cfg_attr(not(test), expect(dead_code, reason = "standard no-preload path used by tests"))]
     pub(crate) fn open(channel: Channel, config: &ExchangeConfig) -> Self {
         let (tx, rx) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
         let protocol_config = ProtocolConfiguration {
@@ -902,10 +900,17 @@ impl ExtProcExchange {
 
     /// Ensure the bootstrap has resolved to a ready response
     /// stream. Awaits the pending Process future if necessary.
-    async fn ensure_response_stream(&mut self) -> Result<(), ExchangeError> {
+    async fn ensure_response_stream(&mut self, deadline: Option<tokio::time::Instant>) -> Result<(), ExchangeError> {
         if let BootstrapState::Pending(ref mut wrapper) = self.bootstrap {
             let future = wrapper.get_mut();
-            let response = future.await.map_err(|status| {
+            let response_result = if let Some(dl) = deadline {
+                tokio::time::timeout_at(dl, future)
+                    .await
+                    .map_err(|_elapsed| ExchangeError::Timeout)?
+            } else {
+                future.await
+            };
+            let response = response_result.map_err(|status| {
                 self.bootstrap = BootstrapState::Closed;
                 self.terminal = true;
                 ExchangeError::Grpc(status)
@@ -918,7 +923,8 @@ impl ExtProcExchange {
     /// Internal receive with deferred stream resolution, override
     /// loop, and classification.
     ///
-    /// 1. Ensures the response stream has been resolved from the pending bootstrap future.
+    /// 1. Ensures the response stream has been resolved from the pending bootstrap future, using the active processing
+    ///    deadline when present.
     /// 2. Reads a response with optional deadline from active processing.
     /// 3. Runs the override loop: if `override_message_timeout` is present on the envelope, it is an override envelope.
     ///    Valid overrides replace the deadline and continue reading. Invalid overrides are silently ignored. The entire
@@ -928,7 +934,8 @@ impl ExtProcExchange {
     ///
     /// [`classify_and_validate`]: Self::classify_and_validate
     async fn receive_inner(&mut self) -> Result<ExchangeEvent, ExchangeError> {
-        self.ensure_response_stream().await?;
+        let initial_deadline = self.active_processing.as_ref().map(|ap| ap.deadline);
+        self.ensure_response_stream(initial_deadline).await?;
         loop {
             let deadline = self.active_processing.as_ref().map(|ap| ap.deadline);
             let stream = match self.bootstrap {

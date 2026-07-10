@@ -85,6 +85,28 @@ processing_mode:
     assert_eq!(filter.name(), "ext_proc");
 }
 
+#[tokio::test]
+async fn parse_full_duplex_request_with_response_headers_send() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+message_timeout_ms: 500
+lifecycle_timeout_ms: 5000
+processing_mode:
+  request_header_mode: send
+  response_header_mode: send
+  request_body_mode: full_duplex_streamed
+  response_body_mode: none
+  request_trailer_mode: skip
+  response_trailer_mode: skip
+"#,
+    )
+    .unwrap();
+
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+    assert_eq!(filter.name(), "ext_proc");
+}
+
 #[test]
 fn defaults_core_fields() {
     let cfg = minimal_config();
@@ -226,7 +248,7 @@ processing_mode:
 }
 
 #[tokio::test]
-async fn rejects_response_header_mode_skip() {
+async fn accepts_response_header_mode_skip() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -236,11 +258,8 @@ processing_mode:
     )
     .unwrap();
 
-    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
-    assert!(
-        err.to_string().contains("response_header_mode"),
-        "error should mention response_header_mode: {err}"
-    );
+    let filter = ExtProcFilter::from_config(&yaml).expect("response_header_mode skip should be supported");
+    assert_eq!(filter.name(), "ext_proc");
 }
 
 #[tokio::test]
@@ -567,7 +586,7 @@ max_message_timeout_ms: 100
 }
 
 #[tokio::test]
-async fn rejects_deferred_close_timeout_less_than_message_timeout() {
+async fn accepts_deferred_close_timeout_shorter_than_message_timeout() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -577,11 +596,22 @@ deferred_close_timeout_ms: 100
     )
     .unwrap();
 
-    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
-    assert!(
-        err.to_string().contains("deferred_close_timeout_ms"),
-        "error should reject deferred_close_timeout_ms < message_timeout_ms: {err}"
-    );
+    let filter = ExtProcFilter::from_config(&yaml).expect("shorter deferred close should be accepted");
+    assert_eq!(filter.name(), "ext_proc");
+}
+
+#[tokio::test]
+async fn accepts_zero_deferred_close_timeout() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+deferred_close_timeout_ms: 0
+"#,
+    )
+    .unwrap();
+
+    let filter = ExtProcFilter::from_config(&yaml).expect("zero deferred close should be accepted");
+    assert_eq!(filter.name(), "ext_proc");
 }
 
 #[tokio::test]
@@ -1824,6 +1854,221 @@ async fn grpc_response_headers_round_trip_applies_mutation() {
         resp.headers.get("x-resp-injected").unwrap(),
         "from-processor",
         "response header should be mutated"
+    );
+}
+
+#[tokio::test]
+async fn filter_sends_response_headers_on_existing_exchange() {
+    struct TwoPhaseProcessor {
+        streams: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ExternalProcessor for TwoPhaseProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            self.streams.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+
+            tokio::spawn(async move {
+                let first = stream.message().await.unwrap().unwrap();
+                assert!(
+                    matches!(first.request, Some(processing_request::Request::RequestHeaders(_))),
+                    "first ext_proc message should be RequestHeaders"
+                );
+                let request_response = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: Some(CommonResponse {
+                            header_mutation: Some(HeaderMutation {
+                                set_headers: vec![make_hvo("x-request-phase", "seen")],
+                                remove_headers: vec![],
+                            }),
+                            ..Default::default()
+                        }),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(request_response)).await);
+
+                let second = stream.message().await.unwrap().unwrap();
+                assert!(
+                    matches!(second.request, Some(processing_request::Request::ResponseHeaders(_))),
+                    "second ext_proc message should be ResponseHeaders"
+                );
+                let response_response = ProcessingResponse {
+                    response: Some(processing_response::Response::ResponseHeaders(HeadersResponse {
+                        response: Some(CommonResponse {
+                            header_mutation: Some(HeaderMutation {
+                                set_headers: vec![make_hvo("x-response-phase", "mutated")],
+                                remove_headers: vec![],
+                            }),
+                            ..Default::default()
+                        }),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(response_response)).await);
+            });
+
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let streams = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(TwoPhaseProcessor {
+        streams: std::sync::Arc::clone(&streams),
+    });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+    let _guard = MockServerGuard {
+        shutdown: Some(shutdown_tx),
+    };
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 5000
+processing_mode:
+  request_header_mode: send
+  response_header_mode: send
+  request_body_mode: none
+  response_body_mode: none
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::GET, "/same-stream");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let request_action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(request_action, FilterAction::Continue),
+        "request header processing should continue, got {request_action:?}"
+    );
+    assert_eq!(
+        streams.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "request phase should open exactly one Process stream"
+    );
+    assert!(
+        ctx.get_filter_state::<ExtProcState>()
+            .is_some_and(|state| state.request_phase_complete),
+        "request phase should leave the exchange open for response headers"
+    );
+    assert!(
+        ctx.extra_request_headers
+            .iter()
+            .any(|(name, value)| name == "x-request-phase" && value == "seen"),
+        "request header mutation should be applied before response phase"
+    );
+
+    let mut resp = make_response();
+    ctx.response_header = Some(&mut resp);
+
+    let response_action = filter.on_response(&mut ctx).await.unwrap();
+    assert!(
+        matches!(response_action, FilterAction::Continue),
+        "response header processing should continue"
+    );
+    assert_eq!(
+        streams.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "response phase should reuse the existing Process stream"
+    );
+    assert!(
+        ctx.get_filter_state::<ExtProcState>().is_none(),
+        "response phase should close and remove the exchange after response headers"
+    );
+    assert!(
+        ctx.response_headers_modified,
+        "response header mutation should mark headers modified"
+    );
+    assert_eq!(
+        ctx.response_header
+            .as_ref()
+            .unwrap()
+            .headers
+            .get("x-response-phase")
+            .unwrap(),
+        "mutated",
+        "response header mutation should be applied"
+    );
+}
+
+#[tokio::test]
+async fn response_header_mode_skip_does_not_process_response_headers() {
+    let (addr, _guard) = start_mock_processor(MockBehavior::AddHeader {
+        name: "x-request-phase".to_owned(),
+        value: "seen".to_owned(),
+    })
+    .await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 5000
+processing_mode:
+  request_header_mode: send
+  response_header_mode: skip
+  request_body_mode: none
+  response_body_mode: none
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::GET, "/skip-response-headers");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let request_action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(request_action, FilterAction::Continue),
+        "request header processing should continue, got {request_action:?}"
+    );
+    assert!(
+        ctx.extra_request_headers
+            .iter()
+            .any(|(name, value)| name == "x-request-phase" && value == "seen"),
+        "request header mutation should still be applied"
+    );
+    assert!(
+        ctx.get_filter_state::<ExtProcState>().is_none(),
+        "response_header_mode skip should close the exchange after request headers"
+    );
+
+    let mut resp = make_response();
+    ctx.response_header = Some(&mut resp);
+
+    let response_action = filter.on_response(&mut ctx).await.unwrap();
+    assert!(
+        matches!(response_action, FilterAction::Continue),
+        "response_header_mode skip should pass response headers through"
+    );
+    assert!(
+        !ctx.response_headers_modified,
+        "response_header_mode skip should not mutate response headers"
     );
 }
 
@@ -6579,6 +6824,8 @@ async fn header_only_mode_unchanged() {
         r#"
 target: "http://{addr}"
 message_timeout_ms: 5000
+processing_mode:
+  response_header_mode: skip
 "#,
     ))
     .unwrap();
@@ -6603,12 +6850,12 @@ message_timeout_ms: 5000
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
         matches!(action, FilterAction::Continue),
-        "header-only on_request should succeed via one-shot callout"
+        "header-only on_request should succeed via request-header exchange"
     );
     let injected = ctx.extra_request_headers.iter().find(|(k, _)| k == "x-header-only");
     assert!(
         injected.is_some(),
-        "header mutation from one-shot callout should be applied"
+        "header mutation from request-header exchange should be applied"
     );
 }
 
@@ -7452,6 +7699,900 @@ processing_mode:
     assert!(
         matches!(action, FilterAction::Reject(Rejection { status: 503, .. })),
         "oversized coalesced body mutation should use status_on_error, got {action:?}"
+    );
+}
+
+#[tokio::test]
+async fn full_duplex_request_then_response_headers_reuses_exchange() {
+    struct FullDuplexResponseHeaderProcessor {
+        streams: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ExternalProcessor for FullDuplexResponseHeaderProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            self.streams.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+
+            tokio::spawn(async move {
+                let first = stream.message().await.unwrap().unwrap();
+                assert!(
+                    matches!(first.request, Some(processing_request::Request::RequestHeaders(_))),
+                    "first ext_proc message should be RequestHeaders"
+                );
+
+                loop {
+                    let msg = stream.message().await.unwrap().unwrap();
+                    if let Some(processing_request::Request::RequestBody(body)) = msg.request
+                        && body.end_of_stream
+                    {
+                        break;
+                    }
+                }
+
+                let header_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(header_resp)).await);
+
+                use crate::proto::envoy::service::ext_proc::v3::{
+                    BodyMutation, CommonResponse, StreamedBodyResponse, body_mutation,
+                };
+                let body_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestBody(BodyResponse {
+                        response: Some(CommonResponse {
+                            body_mutation: Some(BodyMutation {
+                                mutation: Some(body_mutation::Mutation::StreamedResponse(StreamedBodyResponse {
+                                    body: Vec::new(),
+                                    end_of_stream: true,
+                                })),
+                            }),
+                            ..Default::default()
+                        }),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(body_resp)).await);
+
+                let response_headers = stream.message().await.unwrap().unwrap();
+                assert!(
+                    matches!(
+                        response_headers.request,
+                        Some(processing_request::Request::ResponseHeaders(_))
+                    ),
+                    "response phase should send ResponseHeaders after request body drain"
+                );
+                let response_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::ResponseHeaders(HeadersResponse {
+                        response: Some(CommonResponse {
+                            header_mutation: Some(HeaderMutation {
+                                set_headers: vec![make_hvo("x-full-duplex-response", "ok")],
+                                remove_headers: vec![],
+                            }),
+                            ..Default::default()
+                        }),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(response_resp)).await);
+            });
+
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let streams = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(FullDuplexResponseHeaderProcessor {
+        streams: std::sync::Arc::clone(&streams),
+    });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+    let _guard = MockServerGuard {
+        shutdown: Some(shutdown_tx),
+    };
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 5000
+lifecycle_timeout_ms: 5000
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: send
+  response_body_mode: none
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::POST, "/fd-response-headers");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "on_request should bootstrap full-duplex exchange"
+    );
+
+    let mut body = Some(Bytes::from_static(b"request chunk"));
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "non-terminal request body chunk should be sent"
+    );
+
+    let mut eos_body = None;
+    let action = filter.on_request_body(&mut ctx, &mut eos_body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "request body EOS should drain request responses and keep exchange open"
+    );
+    assert!(
+        ctx.get_filter_state::<ExtProcState>()
+            .is_some_and(|state| state.request_phase_complete),
+        "request drain should leave exchange state ready for response headers"
+    );
+
+    let mut resp = make_response();
+    ctx.response_header = Some(&mut resp);
+    let action = filter.on_response(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "response headers should be processed on the existing exchange"
+    );
+    assert_eq!(
+        streams.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "full-duplex request and response headers should use one Process stream"
+    );
+    assert_eq!(
+        ctx.response_header
+            .as_ref()
+            .unwrap()
+            .headers
+            .get("x-full-duplex-response")
+            .unwrap(),
+        "ok",
+        "response header mutation from processor should be applied"
+    );
+}
+
+#[tokio::test]
+async fn response_header_timeout_rejects_with_status_on_error() {
+    struct HangOnResponseHeaders;
+
+    #[async_trait]
+    impl ExternalProcessor for HangOnResponseHeaders {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+
+            tokio::spawn(async move {
+                let _headers = stream.message().await;
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+                let _response_headers = stream.message().await;
+                // Never respond to ResponseHeaders — simulate timeout
+                futures::future::pending::<()>().await;
+            });
+
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(HangOnResponseHeaders);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+    let _guard = MockServerGuard {
+        shutdown: Some(shutdown_tx),
+    };
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 100
+status_on_error: 504
+processing_mode:
+  response_header_mode: send
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::GET, "/timeout-response");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+
+    let mut resp = make_response();
+    ctx.response_header = Some(&mut resp);
+
+    let start = Instant::now();
+    let action = filter.on_response(&mut ctx).await.unwrap();
+    let elapsed = start.elapsed();
+
+    match &action {
+        FilterAction::Reject(r) if r.status == 504 => {},
+        other => panic!("response-header timeout should reject with 504, got {other:?}"),
+    }
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "timeout should fire near configured 100ms, not hang (took {elapsed:?})"
+    );
+}
+
+#[tokio::test]
+async fn response_header_immediate_response_on_existing_exchange() {
+    struct ImmediateOnResponseHeaders {
+        streams: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ExternalProcessor for ImmediateOnResponseHeaders {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            self.streams.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+
+            tokio::spawn(async move {
+                let _headers = stream.message().await;
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+
+                let _response_headers = stream.message().await;
+                use crate::proto::envoy::service::common::v3::HttpStatus;
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::ImmediateResponse(ImmediateResponse {
+                        status: Some(HttpStatus { code: 429 }),
+                        body: "rate limited by processor".to_owned(),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+            });
+
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let streams = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(ImmediateOnResponseHeaders {
+        streams: std::sync::Arc::clone(&streams),
+    });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+    let _guard = MockServerGuard {
+        shutdown: Some(shutdown_tx),
+    };
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 5000
+processing_mode:
+  response_header_mode: send
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::GET, "/immediate-response-phase");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+
+    let mut resp = make_response();
+    ctx.response_header = Some(&mut resp);
+
+    let action = filter.on_response(&mut ctx).await.unwrap();
+    match &action {
+        FilterAction::Reject(r) if r.status == 429 => {},
+        other => panic!("response-header ImmediateResponse should produce 429 rejection, got {other:?}"),
+    }
+    assert_eq!(
+        streams.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "ImmediateResponse during response headers should use the same Process stream"
+    );
+}
+
+#[tokio::test]
+async fn response_header_dynamic_metadata_persisted() {
+    struct MetadataOnResponseHeaders;
+
+    #[async_trait]
+    impl ExternalProcessor for MetadataOnResponseHeaders {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+
+            tokio::spawn(async move {
+                let _headers = stream.message().await;
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+
+                let _response_headers = stream.message().await;
+                let mut fields = HashMap::new();
+                fields.insert(
+                    "response_model".to_owned(),
+                    prost_wkt_types::Value {
+                        kind: Some(prost_wkt_types::value::Kind::StringValue("gpt-4o".to_owned())),
+                    },
+                );
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::ResponseHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    dynamic_metadata: Some(prost_wkt_types::Struct { fields }),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+            });
+
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(MetadataOnResponseHeaders);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+    let _guard = MockServerGuard {
+        shutdown: Some(shutdown_tx),
+    };
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 5000
+processing_mode:
+  response_header_mode: send
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::GET, "/metadata-response");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+
+    let mut resp = make_response();
+    ctx.response_header = Some(&mut resp);
+
+    let action = filter.on_response(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "response header processing should continue, got {action:?}"
+    );
+    assert_eq!(
+        ctx.get_structured_metadata("ext_proc", "response_model"),
+        Some(&serde_json::json!("gpt-4o")),
+        "response-phase dynamic metadata should be persisted to structured_metadata"
+    );
+}
+
+#[tokio::test]
+async fn header_only_request_trailing_drain_does_not_hang() {
+    struct RespondThenHang;
+
+    #[async_trait]
+    impl ExternalProcessor for RespondThenHang {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _headers = stream.message().await;
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: Some(CommonResponse {
+                            header_mutation: Some(HeaderMutation {
+                                set_headers: vec![make_hvo("x-trailing-drain", "applied")],
+                                remove_headers: vec![],
+                            }),
+                            ..Default::default()
+                        }),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+                futures::future::pending::<()>().await;
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(ExternalProcessorServer::new(RespondThenHang))
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+    let _guard = MockServerGuard {
+        shutdown: Some(shutdown_tx),
+    };
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 100
+deferred_close_timeout_ms: 100
+processing_mode:
+  response_header_mode: skip
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::GET, "/trailing-drain");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let start = Instant::now();
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(matches!(action, FilterAction::Continue));
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "header-only request must not hang on trailing drain (took {elapsed:?})"
+    );
+    assert!(
+        ctx.extra_request_headers.iter().any(|(n, _)| n == "x-trailing-drain"),
+        "mutation from the response should still be applied"
+    );
+}
+
+#[tokio::test]
+async fn response_header_continue_trailing_drain_does_not_hang() {
+    struct RespondBothThenHang;
+
+    #[async_trait]
+    impl ExternalProcessor for RespondBothThenHang {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _headers = stream.message().await;
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+
+                let _response_headers = stream.message().await;
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::ResponseHeaders(HeadersResponse {
+                        response: Some(CommonResponse {
+                            header_mutation: Some(HeaderMutation {
+                                set_headers: vec![make_hvo("x-resp-drain", "applied")],
+                                remove_headers: vec![],
+                            }),
+                            ..Default::default()
+                        }),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+                futures::future::pending::<()>().await;
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(ExternalProcessorServer::new(RespondBothThenHang))
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+    let _guard = MockServerGuard {
+        shutdown: Some(shutdown_tx),
+    };
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 200
+deferred_close_timeout_ms: 200
+processing_mode:
+  response_header_mode: send
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::GET, "/resp-trailing-drain");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+
+    let mut resp = make_response();
+    ctx.response_header = Some(&mut resp);
+
+    let start = Instant::now();
+    let action = filter.on_response(&mut ctx).await.unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(matches!(action, FilterAction::Continue));
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "response-header Continue must not hang on trailing drain (took {elapsed:?})"
+    );
+    assert!(ctx.response_headers_modified, "response mutation should be applied");
+}
+
+#[tokio::test]
+async fn response_header_immediate_does_not_hang_on_trailing_drain() {
+    struct ImmediateThenHang;
+
+    #[async_trait]
+    impl ExternalProcessor for ImmediateThenHang {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _headers = stream.message().await;
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+
+                let _response_headers = stream.message().await;
+                use crate::proto::envoy::service::common::v3::HttpStatus;
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::ImmediateResponse(ImmediateResponse {
+                        status: Some(HttpStatus { code: 503 }),
+                        body: "rejected during response".to_owned(),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+                futures::future::pending::<()>().await;
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(ExternalProcessorServer::new(ImmediateThenHang))
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+    let _guard = MockServerGuard {
+        shutdown: Some(shutdown_tx),
+    };
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 200
+deferred_close_timeout_ms: 200
+processing_mode:
+  response_header_mode: send
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::GET, "/imm-trailing-drain");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+
+    let mut resp = make_response();
+    ctx.response_header = Some(&mut resp);
+
+    let start = Instant::now();
+    let action = filter.on_response(&mut ctx).await.unwrap();
+    let elapsed = start.elapsed();
+
+    match &action {
+        FilterAction::Reject(r) if r.status == 503 => {},
+        other => panic!("response-header ImmediateResponse should produce 503, got {other:?}"),
+    }
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "ImmediateResponse must not hang on trailing drain (took {elapsed:?})"
+    );
+}
+
+#[tokio::test]
+async fn response_header_mode_send_without_state_rejects() {
+    let (addr, _guard) = start_mock_processor(MockBehavior::AddHeader {
+        name: "x-req".to_owned(),
+        value: "ok".to_owned(),
+    })
+    .await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 200
+status_on_error: 502
+processing_mode:
+  response_header_mode: send
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::GET, "/missing-state");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    // Skip on_request so no ExtProcState is stored
+    let mut resp = make_response();
+    ctx.response_header = Some(&mut resp);
+
+    let action = filter.on_response(&mut ctx).await.unwrap();
+    match &action {
+        FilterAction::Reject(r) if r.status == 502 => {},
+        other => panic!("missing state should reject with status_on_error 502, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn response_header_override_timeout_respected() {
+    struct OverrideThenDelayedResponse;
+
+    #[async_trait]
+    impl ExternalProcessor for OverrideThenDelayedResponse {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _headers = stream.message().await;
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+
+                let _response_headers = stream.message().await;
+                // Send override extending timeout to 2s
+                let override_resp = ProcessingResponse {
+                    override_message_timeout: Some(prost_types::Duration { seconds: 2, nanos: 0 }),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(override_resp)).await);
+
+                // Delay past original message_timeout (200ms) but within override (2s)
+                tokio::time::sleep(Duration::from_millis(400)).await;
+
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::ResponseHeaders(HeadersResponse {
+                        response: Some(CommonResponse {
+                            header_mutation: Some(HeaderMutation {
+                                set_headers: vec![make_hvo("x-override-worked", "yes")],
+                                remove_headers: vec![],
+                            }),
+                            ..Default::default()
+                        }),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(ExternalProcessorServer::new(OverrideThenDelayedResponse))
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+    let _guard = MockServerGuard {
+        shutdown: Some(shutdown_tx),
+    };
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 200
+max_message_timeout_ms: 5000
+deferred_close_timeout_ms: 200
+processing_mode:
+  response_header_mode: send
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::GET, "/override-timeout");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+
+    let mut resp = make_response();
+    ctx.response_header = Some(&mut resp);
+
+    let action = filter.on_response(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "response headers should succeed via timeout override, got {action:?}"
+    );
+    assert_eq!(
+        ctx.response_header
+            .as_ref()
+            .unwrap()
+            .headers
+            .get("x-override-worked")
+            .unwrap(),
+        "yes",
+        "response mutation from delayed-but-overridden response should be applied"
     );
 }
 
