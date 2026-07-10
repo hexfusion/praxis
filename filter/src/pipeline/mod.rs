@@ -42,6 +42,8 @@ pub(crate) mod filter;
 mod http;
 mod http_utils;
 mod tcp;
+#[cfg(test)]
+mod test_filters;
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]

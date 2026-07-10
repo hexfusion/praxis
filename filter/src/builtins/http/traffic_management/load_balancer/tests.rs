@@ -41,6 +41,31 @@ fn new_multiple_clusters() {
     assert_eq!(lb.clusters.len(), 2, "both clusters should be registered");
 }
 
+#[test]
+fn load_balancer_clusters_reports_configured_clusters() {
+    let clusters = vec![
+        test_cluster("web", &["127.0.0.1:8080"]),
+        test_cluster("api", &["127.0.0.1:9090"]),
+    ];
+    let lb = LoadBalancerFilter::new(&clusters);
+    let mut cluster_names = lb.load_balancer_clusters();
+    cluster_names.sort();
+    assert_eq!(
+        cluster_names,
+        vec!["api".to_owned(), "web".to_owned()],
+        "load balancer should report configured clusters"
+    );
+}
+
+#[test]
+fn empty_load_balancer_reports_no_clusters() {
+    let lb = LoadBalancerFilter::new(&[]);
+    assert!(
+        lb.load_balancer_clusters().is_empty(),
+        "empty load balancer should report no clusters"
+    );
+}
+
 #[tokio::test]
 async fn on_request_sets_upstream_round_robin() {
     let lb = LoadBalancerFilter::new(&[test_cluster("web", &["127.0.0.1:8080"])]);

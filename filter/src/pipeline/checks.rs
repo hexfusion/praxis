@@ -33,9 +33,9 @@ const REWRITE_FILTERS: &[&str] = &["path_rewrite", "url_rewrite"];
 /// `load_balancer` without a filter that sets `ctx.cluster` will fail
 /// every request with "no cluster selected".
 #[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
-pub(super) fn check_lb_without_cluster_selector(names: &[&str], errors: &mut Vec<String>) {
-    for (i, name) in names.iter().enumerate() {
-        if *name == "load_balancer" && !names[..i].contains(&"router") {
+pub(super) fn check_lb_without_cluster_selector(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for (i, filter) in filters.iter().enumerate() {
+        if filter.filter.name() == "load_balancer" && !filters[..i].iter().any(|f| f.filter.selects_cluster()) {
             errors.push(
                 "load_balancer without a preceding router \
                  or cluster-selecting filter; requests will \
@@ -137,11 +137,49 @@ pub(super) fn check_duplicate_load_balancers(names: &[&str], errors: &mut Vec<St
     }
 }
 
+/// Multiple cluster-selecting filters before the same load balancer
+/// compete for `ctx.cluster`; the later one silently overwrites the
+/// earlier selection.
+#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
+pub(super) fn check_conflicting_cluster_selectors(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for (i, filter) in filters.iter().enumerate() {
+        if filter.filter.name() != "load_balancer" {
+            continue;
+        }
+
+        let mut saw_router = false;
+        let selectors: Vec<&str> = filters[..i]
+            .iter()
+            .filter(|f| f.filter.selects_cluster())
+            .filter_map(|f| {
+                let name = f.filter.name();
+                if name == "router" {
+                    if saw_router {
+                        return None;
+                    }
+                    saw_router = true;
+                }
+                Some(name)
+            })
+            .collect();
+
+        if selectors.len() > 1 {
+            errors.push(format!(
+                "pipeline contains multiple cluster-selecting filters \
+                 before load_balancer ({}); only the last one's cluster \
+                 selection will take effect",
+                selectors.join(", ")
+            ));
+            return;
+        }
+    }
+}
+
 /// Every cluster selected by a pipeline filter must be defined by the
 /// load balancer that will consume `ctx.cluster`.
-pub(super) fn check_misaligned_clusters(entries: &[FilterEntry], errors: &mut Vec<String>) {
-    let selected_clusters = super::clusters::extract_selected_clusters(entries);
-    let lb_clusters = super::clusters::extract_lb_clusters(entries);
+pub(super) fn check_misaligned_clusters(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    let selected_clusters = super::clusters::extract_selected_clusters(filters);
+    let lb_clusters = super::clusters::extract_lb_clusters(filters);
 
     if selected_clusters.is_empty() || lb_clusters.is_empty() {
         return;
@@ -280,13 +318,13 @@ mod tests {
     use praxis_core::config::{Condition, ConditionMatch, FailureMode, FilterEntry};
 
     use super::*;
-    use crate::any_filter::AnyFilter;
+    use crate::pipeline::test_filters::{lb_filter, noop_filter_with_conditions, selector_filter};
 
     #[test]
     fn lb_without_router_errors() {
-        let names = vec!["load_balancer"];
+        let filters = vec![lb_filter(&[])];
         let mut errors = Vec::new();
-        check_lb_without_cluster_selector(&names, &mut errors);
+        check_lb_without_cluster_selector(&filters, &mut errors);
         assert_eq!(errors.len(), 1, "should produce exactly one error");
         assert!(
             errors[0].contains("load_balancer without a preceding router"),
@@ -297,38 +335,173 @@ mod tests {
 
     #[test]
     fn lb_with_router_no_error() {
-        let names = vec!["router", "load_balancer"];
+        let filters = vec![selector_filter("router", &[]), lb_filter(&[])];
         let mut errors = Vec::new();
-        check_lb_without_cluster_selector(&names, &mut errors);
+        check_lb_without_cluster_selector(&filters, &mut errors);
         assert!(errors.is_empty(), "router before LB should produce no errors");
     }
 
     #[test]
     fn lb_with_only_non_cluster_filter_errors() {
-        let names = vec!["custom_filter", "load_balancer"];
+        let filters = vec![named_noop_filter("custom_filter", vec![]), lb_filter(&[])];
         let mut errors = Vec::new();
-        check_lb_without_cluster_selector(&names, &mut errors);
+        check_lb_without_cluster_selector(&filters, &mut errors);
         assert_eq!(errors.len(), 1);
         assert!(
             errors[0].contains("load_balancer without a preceding router"),
-            "non-cluster-selecting filter should not satisfy router requirement: {}",
+            "non-cluster-selecting filter should not satisfy requirement: {}",
             errors[0]
         );
     }
 
     #[test]
-    fn non_cluster_filter_with_router_no_error() {
-        let names = vec!["custom_filter", "router", "load_balancer"];
+    fn custom_cluster_selector_before_lb_no_error() {
+        let filters = vec![selector_filter("custom_selector", &["c"]), lb_filter(&[])];
         let mut errors = Vec::new();
-        check_lb_without_cluster_selector(&names, &mut errors);
-        assert!(errors.is_empty());
+        check_lb_without_cluster_selector(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "custom cluster selector before LB should produce no errors"
+        );
+    }
+
+    #[test]
+    fn named_non_cluster_filter_before_lb_errors() {
+        let filters = vec![named_noop_filter("classifier", vec![]), lb_filter(&[])];
+        let mut errors = Vec::new();
+        check_lb_without_cluster_selector(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "named non-cluster filter before LB should error");
+    }
+
+    #[test]
+    fn non_cluster_filter_then_router_then_lb_no_error() {
+        let filters = vec![
+            named_noop_filter("classifier", vec![]),
+            selector_filter("router", &[]),
+            lb_filter(&[]),
+        ];
+        let mut errors = Vec::new();
+        check_lb_without_cluster_selector(&filters, &mut errors);
+        assert!(errors.is_empty(), "non-cluster filter -> router -> LB should be valid");
+    }
+
+    #[test]
+    fn router_and_custom_selector_conflict_rejected() {
+        let filters = vec![
+            selector_filter("router", &[]),
+            selector_filter("custom_selector", &["c"]),
+            lb_filter(&[]),
+        ];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "two selectors should produce a conflict error");
+        assert!(
+            errors[0].contains("multiple cluster-selecting filters"),
+            "error should mention conflicting selectors: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn custom_selector_and_router_conflict_rejected() {
+        let filters = vec![
+            selector_filter("custom_selector", &["c"]),
+            selector_filter("router", &[]),
+            lb_filter(&[]),
+        ];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "two selectors should produce a conflict error");
+    }
+
+    #[test]
+    fn duplicate_routers_before_lb_do_not_add_selector_conflict() {
+        let filters = vec![
+            selector_filter("router", &[]),
+            selector_filter("router", &[]),
+            lb_filter(&[]),
+        ];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "duplicate router validation should own this diagnostic"
+        );
+    }
+
+    #[test]
+    fn duplicate_routers_plus_custom_selector_still_conflict() {
+        let filters = vec![
+            selector_filter("router", &[]),
+            selector_filter("router", &[]),
+            selector_filter("custom_selector", &["c"]),
+            lb_filter(&[]),
+        ];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "router plus another selector should still produce a conflict"
+        );
+        assert!(
+            errors[0].contains("router, custom_selector"),
+            "error should collapse duplicate router names but keep the real conflict: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn non_cluster_filter_and_router_no_conflict() {
+        let filters = vec![
+            named_noop_filter("classifier", vec![]),
+            selector_filter("router", &[]),
+            lb_filter(&[]),
+        ];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&filters, &mut errors);
+        assert!(errors.is_empty(), "non-cluster filter + router should not conflict");
+    }
+
+    #[test]
+    fn custom_selector_without_router_no_conflict() {
+        let filters = vec![selector_filter("custom_selector", &["c"]), lb_filter(&[])];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&filters, &mut errors);
+        assert!(errors.is_empty(), "single custom selector should not conflict");
+    }
+
+    #[test]
+    fn multiple_selectors_without_lb_no_conflict() {
+        let filters = vec![
+            selector_filter("router", &[]),
+            selector_filter("custom_selector", &["c"]),
+        ];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&filters, &mut errors);
+        assert!(errors.is_empty(), "multiple selectors without LB should not conflict");
+    }
+
+    #[test]
+    fn router_after_lb_does_not_conflict_with_selector_before_lb() {
+        let filters = vec![
+            selector_filter("custom_selector", &["c"]),
+            lb_filter(&[]),
+            selector_filter("router", &[]),
+        ];
+        let mut errors = Vec::new();
+        check_conflicting_cluster_selectors(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "conflict check should only consider selectors before the load balancer"
+        );
     }
 
     #[test]
     fn no_lb_no_error() {
-        let names = vec!["router", "ip_acl"];
+        let filters = vec![selector_filter("router", &[])];
         let mut errors = Vec::new();
-        check_lb_without_cluster_selector(&names, &mut errors);
+        check_lb_without_cluster_selector(&filters, &mut errors);
         assert!(errors.is_empty(), "no LB present should produce no errors");
     }
 
@@ -544,15 +717,9 @@ mod tests {
 
     #[test]
     fn misaligned_clusters_errors() {
-        let entries = vec![
-            make_entry("router", "routes:\n  - path_prefix: \"/\"\n    cluster: missing"),
-            make_entry(
-                "load_balancer",
-                "clusters:\n  - name: other\n    endpoints: [\"1.2.3.4:80\"]",
-            ),
-        ];
+        let filters = vec![selector_filter("router", &["missing"]), lb_filter(&["other"])];
         let mut errors = Vec::new();
-        check_misaligned_clusters(&entries, &mut errors);
+        check_misaligned_clusters(&filters, &mut errors);
         assert_eq!(errors.len(), 1, "should produce exactly one error");
         assert!(
             errors[0].contains("missing") && errors[0].contains("not defined"),
@@ -563,16 +730,26 @@ mod tests {
 
     #[test]
     fn aligned_clusters_no_error() {
-        let entries = vec![
-            make_entry("router", "routes:\n  - path_prefix: \"/\"\n    cluster: web"),
-            make_entry(
-                "load_balancer",
-                "clusters:\n  - name: web\n    endpoints: [\"1.2.3.4:80\"]",
-            ),
+        let filters = vec![selector_filter("router", &["web"]), lb_filter(&["web"])];
+        let mut errors = Vec::new();
+        check_misaligned_clusters(&filters, &mut errors);
+        assert!(errors.is_empty(), "aligned clusters should produce no errors");
+    }
+
+    #[test]
+    fn custom_selector_missing_cluster_reference_rejected() {
+        let filters = vec![
+            selector_filter("custom_selector", &["missing-custom-cluster"]),
+            lb_filter(&["other"]),
         ];
         let mut errors = Vec::new();
-        check_misaligned_clusters(&entries, &mut errors);
-        assert!(errors.is_empty(), "aligned clusters should produce no errors");
+        check_misaligned_clusters(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "should produce exactly one error");
+        assert!(
+            errors[0].contains("missing-custom-cluster") && errors[0].contains("not defined"),
+            "error should mention the missing custom selector cluster: {}",
+            errors[0]
+        );
     }
 
     #[test]
@@ -619,15 +796,11 @@ mod tests {
 
     /// Build a [`PipelineFilter`] with the given conditions.
     fn make_pf(conditions: Vec<Condition>) -> PipelineFilter {
-        PipelineFilter {
-            filter_id: 0,
-            branches: vec![],
-            conditions,
-            failure_mode: FailureMode::default(),
-            filter: AnyFilter::Http(Box::new(NoopFilter)),
-            name: None,
-            response_conditions: vec![],
-        }
+        named_noop_filter("noop", conditions)
+    }
+
+    fn named_noop_filter(name: &'static str, conditions: Vec<Condition>) -> PipelineFilter {
+        noop_filter_with_conditions(name, conditions)
     }
 
     /// Build a `When` condition for testing.
@@ -650,23 +823,6 @@ mod tests {
             config: serde_yaml::from_str(yaml).expect("valid test YAML"),
             name: None,
             response_conditions: vec![],
-        }
-    }
-
-    /// Noop HTTP filter for pipeline filter construction.
-    struct NoopFilter;
-
-    #[async_trait::async_trait]
-    impl crate::filter::HttpFilter for NoopFilter {
-        fn name(&self) -> &'static str {
-            "noop"
-        }
-
-        async fn on_request(
-            &self,
-            _ctx: &mut crate::filter::HttpFilterContext<'_>,
-        ) -> Result<crate::FilterAction, crate::FilterError> {
-            Ok(crate::FilterAction::Continue)
         }
     }
 }

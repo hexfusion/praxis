@@ -133,13 +133,14 @@ impl FilterPipeline {
 
         let mut errors = Vec::new();
 
-        super::checks::check_lb_without_cluster_selector(&names, &mut errors);
+        super::checks::check_lb_without_cluster_selector(&self.filters, &mut errors);
         super::checks::check_unconditional_static_response(&names, &self.filters, &mut errors);
         super::checks::check_conditional_security(&names, &self.filters, &mut errors);
         super::checks::check_open_security_filters(&names, &self.filters, allow_open_security, &mut errors);
         super::checks::check_duplicate_routers(&names, &mut errors);
         super::checks::check_duplicate_load_balancers(&names, &mut errors);
-        super::checks::check_misaligned_clusters(entries, &mut errors);
+        super::checks::check_conflicting_cluster_selectors(&self.filters, &mut errors);
+        super::checks::check_misaligned_clusters(&self.filters, &mut errors);
         super::checks::check_duplicate_rewrite_filters(&names, entries, &mut errors);
 
         errors

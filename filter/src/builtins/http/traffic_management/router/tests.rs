@@ -132,6 +132,30 @@ fn from_config_parses_routes() {
 }
 
 #[test]
+fn selected_clusters_reports_route_targets() {
+    let router = make_router(vec![prefix_route("/api/", "api"), prefix_route("/", "default")]);
+    assert!(router.selects_cluster(), "router should declare cluster selection");
+    assert_eq!(
+        router.selected_clusters(),
+        vec!["api".to_owned(), "default".to_owned()],
+        "router should report route target clusters"
+    );
+}
+
+#[test]
+fn empty_route_table_still_declares_cluster_selection() {
+    let router = make_router(vec![]);
+    assert!(
+        router.selects_cluster(),
+        "router should declare cluster selection even with no routes"
+    );
+    assert!(
+        router.selected_clusters().is_empty(),
+        "empty router should report no configured target clusters"
+    );
+}
+
+#[test]
 fn from_config_empty_routes_key_missing() {
     let yaml = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
 

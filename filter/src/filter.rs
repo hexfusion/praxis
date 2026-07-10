@@ -67,6 +67,41 @@ pub trait HttpFilter: Send + Sync {
     /// Called for each incoming request, in pipeline order.
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError>;
 
+    // -------------------------------------------------------------------------
+    // Pipeline Capability Declarations
+    // -------------------------------------------------------------------------
+
+    /// Whether this filter can assign [`HttpFilterContext::cluster`].
+    ///
+    /// Pipeline validation uses this to detect `load_balancer`
+    /// configurations that cannot receive a cluster selection and to
+    /// reject multiple competing cluster selectors before the same
+    /// load balancer. Filters that route to named clusters should
+    /// override this.
+    ///
+    /// [`HttpFilterContext::cluster`]: crate::HttpFilterContext::cluster
+    fn selects_cluster(&self) -> bool {
+        false
+    }
+
+    /// The cluster names this filter may select at runtime.
+    ///
+    /// Return every configured cluster target so pipeline validation
+    /// can verify that downstream load balancers define matching
+    /// clusters. Filters without static cluster targets can leave the
+    /// default empty list.
+    fn selected_clusters(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The cluster names this filter can load balance.
+    ///
+    /// Load-balancing filters override this so validation can compare
+    /// selector outputs against the configured upstream cluster set.
+    fn load_balancer_clusters(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Called for each response, in reverse pipeline order.
     ///
     /// Default: [`FilterAction::Continue`]
@@ -286,6 +321,20 @@ mod tests {
         assert!(
             !filter.needs_request_context(),
             "default needs_request_context should be false"
+        );
+    }
+
+    #[test]
+    fn default_cluster_capabilities_are_empty() {
+        let filter = MinimalFilter;
+        assert!(!filter.selects_cluster(), "default selects_cluster should be false");
+        assert!(
+            filter.selected_clusters().is_empty(),
+            "default selected_clusters should be empty"
+        );
+        assert!(
+            filter.load_balancer_clusters().is_empty(),
+            "default load_balancer_clusters should be empty"
         );
     }
 

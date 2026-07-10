@@ -365,6 +365,17 @@ impl HttpFilter for RouterFilter {
         "router"
     }
 
+    fn selects_cluster(&self) -> bool {
+        true
+    }
+
+    fn selected_clusters(&self) -> Vec<String> {
+        self.routes
+            .iter()
+            .map(|route| route.route.cluster.to_string())
+            .collect()
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let path = ctx.rewritten_path.as_deref().unwrap_or_else(|| ctx.request.uri.path());
         let host = ctx

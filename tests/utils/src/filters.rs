@@ -7,6 +7,61 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use praxis_filter::{BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext};
 
+/// Test probe for body-phase header mutations through `StreamBuffer`.
+///
+/// Sets a custom header, removes a client-provided header, and adds
+/// a reserved `x-praxis-*` header during body pre-read so the
+/// writeback and stripping contracts can be validated.
+pub struct HeaderMutatingStreamBufferFilter;
+
+#[async_trait]
+impl HttpFilter for HeaderMutatingStreamBufferFilter {
+    fn name(&self) -> &'static str {
+        "test_header_mutator"
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer {
+            max_bytes: Some(65_536),
+        }
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if !end_of_stream {
+            return Ok(FilterAction::Continue);
+        }
+
+        ctx.request_headers_to_set.push((
+            http::header::HeaderName::from_static("x-body-phase-set"),
+            http::header::HeaderValue::from_static("from-body-filter"),
+        ));
+
+        ctx.request_headers_to_set.push((
+            http::header::HeaderName::from_static("x-praxis-internal-leak"),
+            http::header::HeaderValue::from_static("should-be-stripped"),
+        ));
+
+        if let Ok(name) = http::header::HeaderName::from_bytes(b"x-client-remove-me") {
+            ctx.request_headers_to_remove.push(name);
+        }
+
+        Ok(FilterAction::Release)
+    }
+}
+
 /// Test-only probe for the `ReadWrite` + `StreamBuffer` adapter contract.
 ///
 /// Exercises body mutation, path rewrite, and cluster selection during

@@ -42,6 +42,30 @@ impl AnyFilter {
             Self::Tcp(_) => ProtocolKind::Tcp,
         }
     }
+
+    /// Whether the filter can assign an upstream cluster.
+    pub fn selects_cluster(&self) -> bool {
+        match self {
+            Self::Http(f) => f.selects_cluster(),
+            Self::Tcp(_) => false,
+        }
+    }
+
+    /// Cluster names this filter may assign.
+    pub fn selected_clusters(&self) -> Vec<String> {
+        match self {
+            Self::Http(f) => f.selected_clusters(),
+            Self::Tcp(_) => Vec::new(),
+        }
+    }
+
+    /// Cluster names this filter can load balance.
+    pub fn load_balancer_clusters(&self) -> Vec<String> {
+        match self {
+            Self::Http(f) => f.load_balancer_clusters(),
+            Self::Tcp(_) => Vec::new(),
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -94,6 +118,56 @@ mod tests {
         assert_eq!(f.name(), "stub_tcp", "Tcp variant should delegate name to inner filter");
     }
 
+    #[test]
+    fn http_variant_cluster_capabilities_delegate_to_inner_filter() {
+        let f = AnyFilter::Http(Box::new(ClusterSelectingHttpFilter));
+        assert!(f.selects_cluster(), "Http variant should delegate selects_cluster");
+        assert_eq!(
+            f.selected_clusters(),
+            vec!["web".to_owned()],
+            "Http variant should delegate selected_clusters"
+        );
+        assert_eq!(
+            f.load_balancer_clusters(),
+            vec!["web".to_owned(), "api".to_owned()],
+            "Http variant should delegate load_balancer_clusters"
+        );
+    }
+
+    #[test]
+    fn http_variant_default_cluster_capabilities_are_empty() {
+        let f = AnyFilter::Http(Box::new(StubHttpFilter));
+        assert!(
+            !f.selects_cluster(),
+            "Http variant should default to no cluster selection"
+        );
+        assert!(
+            f.selected_clusters().is_empty(),
+            "Http variant should default to no selected clusters"
+        );
+        assert!(
+            f.load_balancer_clusters().is_empty(),
+            "Http variant should default to no load-balancer clusters"
+        );
+    }
+
+    #[test]
+    fn tcp_variant_has_no_http_cluster_capabilities() {
+        let f = AnyFilter::Tcp(Box::new(StubTcpFilter));
+        assert!(
+            !f.selects_cluster(),
+            "Tcp variant should not report HTTP cluster selection"
+        );
+        assert!(
+            f.selected_clusters().is_empty(),
+            "Tcp variant should not report selected HTTP clusters"
+        );
+        assert!(
+            f.load_balancer_clusters().is_empty(),
+            "Tcp variant should not report HTTP load-balancer clusters"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -105,6 +179,32 @@ mod tests {
     impl HttpFilter for StubHttpFilter {
         fn name(&self) -> &'static str {
             "stub_http"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    /// Stub HTTP filter with pipeline cluster capabilities.
+    struct ClusterSelectingHttpFilter;
+
+    #[async_trait]
+    impl HttpFilter for ClusterSelectingHttpFilter {
+        fn name(&self) -> &'static str {
+            "cluster_http"
+        }
+
+        fn selects_cluster(&self) -> bool {
+            true
+        }
+
+        fn selected_clusters(&self) -> Vec<String> {
+            vec!["web".to_owned()]
+        }
+
+        fn load_balancer_clusters(&self) -> Vec<String> {
+            vec!["web".to_owned(), "api".to_owned()]
         }
 
         async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {

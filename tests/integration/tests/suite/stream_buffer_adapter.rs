@@ -101,6 +101,100 @@ fn stream_buffer_readwrite_content_length_repaired() {
     );
 }
 
+// -----------------------------------------------------------------------------
+// Body-phase Header Writeback Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn stream_buffer_body_phase_headers_to_set_reach_backend() {
+    let backend_guard = start_header_echo_backend();
+    let proxy_port = free_port();
+
+    let yaml = header_mutator_yaml(proxy_port, backend_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let registry = registry_with_header_mutator();
+    let proxy = start_proxy_with_registry(&config, &registry);
+
+    let request = format!(
+        "POST / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: text/plain\r\n\
+         Content-Length: 4\r\n\
+         x-client-remove-me: present\r\n\
+         \r\n\
+         test"
+    );
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(parse_status(&raw), 200);
+    let headers = parse_body(&raw);
+    assert!(
+        headers.contains("x-body-phase-set: from-body-filter"),
+        "body-phase headers_to_set should reach backend: {headers}"
+    );
+}
+
+#[test]
+fn stream_buffer_body_phase_headers_to_remove_reach_backend() {
+    let backend_guard = start_header_echo_backend();
+    let proxy_port = free_port();
+
+    let yaml = header_mutator_yaml(proxy_port, backend_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let registry = registry_with_header_mutator();
+    let proxy = start_proxy_with_registry(&config, &registry);
+
+    let request = format!(
+        "POST / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: text/plain\r\n\
+         Content-Length: 4\r\n\
+         x-client-remove-me: present\r\n\
+         \r\n\
+         test"
+    );
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(parse_status(&raw), 200);
+    let headers = parse_body(&raw);
+    assert!(
+        !headers.contains("x-client-remove-me"),
+        "body-phase headers_to_remove should strip client header: {headers}"
+    );
+}
+
+#[test]
+fn stream_buffer_body_phase_reserved_header_stripped_before_upstream() {
+    let backend_guard = start_header_echo_backend();
+    let proxy_port = free_port();
+
+    let yaml = header_mutator_yaml(proxy_port, backend_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let registry = registry_with_header_mutator();
+    let proxy = start_proxy_with_registry(&config, &registry);
+
+    let request = format!(
+        "POST / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: text/plain\r\n\
+         Content-Length: 4\r\n\
+         \r\n\
+         test"
+    );
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(parse_status(&raw), 200);
+    let headers = parse_body(&raw);
+    assert!(
+        !headers.contains("x-praxis-internal-leak"),
+        "reserved x-praxis-* headers set during body phase must be stripped before upstream: {headers}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Registries
+// -----------------------------------------------------------------------------
+
 fn registry_with_mutator() -> praxis_filter::FilterRegistry {
     let mut registry = praxis_filter::FilterRegistry::with_builtins();
     registry
@@ -114,6 +208,23 @@ fn registry_with_mutator() -> praxis_filter::FilterRegistry {
     registry
 }
 
+fn registry_with_header_mutator() -> praxis_filter::FilterRegistry {
+    let mut registry = praxis_filter::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_header_mutator",
+            praxis_filter::FilterFactory::Http(std::sync::Arc::new(|_| {
+                Ok(Box::new(praxis_test_utils::filters::HeaderMutatingStreamBufferFilter))
+            })),
+        )
+        .expect("duplicate filter name");
+    registry
+}
+
+// -----------------------------------------------------------------------------
+// YAML Utilities
+// -----------------------------------------------------------------------------
+
 fn mutator_yaml(proxy_port: u16, backend_port: u16) -> String {
     format!(
         r#"
@@ -125,6 +236,30 @@ filter_chains:
   - name: main
     filters:
       - filter: test_body_mutator
+      - filter: load_balancer
+        clusters:
+          - name: "backend"
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#,
+    )
+}
+
+fn header_mutator_yaml(proxy_port: u16, backend_port: u16) -> String {
+    format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: test_header_mutator
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
       - filter: load_balancer
         clusters:
           - name: "backend"

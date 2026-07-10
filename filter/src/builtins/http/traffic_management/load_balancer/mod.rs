@@ -121,6 +121,10 @@ impl HttpFilter for LoadBalancerFilter {
         "load_balancer"
     }
 
+    fn load_balancer_clusters(&self) -> Vec<String> {
+        self.clusters.keys().map(ToString::to_string).collect()
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let Some(cluster_name) = ctx.cluster.as_deref() else {
             return Err(
