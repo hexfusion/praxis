@@ -692,6 +692,46 @@ async fn allows_tab_character() {
     );
 }
 
+#[tokio::test]
+async fn rejects_batch_exceeding_max_size_through_filter() {
+    let filter = JsonRpcFilter {
+        config: make_config_with_batch_limit(1),
+        max_body_bytes: 1_048_576,
+    };
+    let req = crate::test_utils::make_request(http::Method::POST, "/rpc");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let json = br#"[{"jsonrpc":"2.0","method":"a","id":1},{"jsonrpc":"2.0","method":"b","id":2}]"#;
+    let mut body = Some(Bytes::from_static(json));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 400),
+        "batch exceeding max_batch_size should be rejected with 400"
+    );
+}
+
+#[tokio::test]
+async fn batch_too_large_rejects_regardless_of_on_invalid() {
+    let filter = JsonRpcFilter {
+        config: super::config::JsonRpcConfig {
+            batch_policy: BatchPolicy::First,
+            headers: JsonRpcHeaders::default(),
+            max_batch_size: 1,
+            max_body_bytes: 1_048_576,
+            on_invalid: OnInvalidBehavior::Continue,
+        },
+        max_body_bytes: 1_048_576,
+    };
+    let req = crate::test_utils::make_request(http::Method::POST, "/rpc");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let json = br#"[{"jsonrpc":"2.0","method":"a","id":1},{"jsonrpc":"2.0","method":"b","id":2}]"#;
+    let mut body = Some(Bytes::from_static(json));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 400),
+        "batch_too_large must reject with 400 even when on_invalid is continue"
+    );
+}
+
 #[test]
 fn body_access_is_read_only() {
     let filter = make_filter();

@@ -113,6 +113,16 @@ impl JsonRpcFilter {
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: JsonRpcConfig = parse_filter_config("json_rpc", config)?;
         let (max_body_bytes, validated_config) = build_config(cfg)?;
+
+        if validated_config.batch_policy == BatchPolicy::First {
+            warn!(
+                max_batch_size = validated_config.max_batch_size,
+                "json_rpc batch_policy is 'first': only the first item \
+                 in a batch is used for routing; remaining items bypass \
+                 per-request policy checks"
+            );
+        }
+
         Ok(Box::new(Self {
             config: validated_config,
             max_body_bytes,
