@@ -247,6 +247,31 @@ fn warn_insecure_options(config: &Config) {
         o.skip_pipeline_validation,
         "skip_pipeline_validation: pipeline errors demoted to warnings",
     );
+    warn_pipeline_check_skips(&o.skip_pipeline_checks);
+}
+
+/// Emit startup warnings for active granular pipeline check skip flags.
+fn warn_pipeline_check_skips(s: &praxis_core::config::SkipPipelineChecks) {
+    if !s.any() {
+        return;
+    }
+    insecure_warn(s.conditional_security, "skip_pipeline_checks.conditional_security");
+    insecure_warn(
+        s.conflicting_cluster_selectors,
+        "skip_pipeline_checks.conflicting_cluster_selectors",
+    );
+    insecure_warn(
+        s.duplicate_load_balancers,
+        "skip_pipeline_checks.duplicate_load_balancers",
+    );
+    insecure_warn(
+        s.duplicate_rewrite_filters,
+        "skip_pipeline_checks.duplicate_rewrite_filters",
+    );
+    insecure_warn(s.duplicate_routers, "skip_pipeline_checks.duplicate_routers");
+    insecure_warn(s.lb_without_router, "skip_pipeline_checks.lb_without_router");
+    insecure_warn(s.misaligned_clusters, "skip_pipeline_checks.misaligned_clusters");
+    insecure_warn(s.unreachable_filters, "skip_pipeline_checks.unreachable_filters");
 }
 
 /// Log a warning if an insecure option is active.

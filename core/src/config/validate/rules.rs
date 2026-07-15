@@ -17,7 +17,7 @@ use super::{
     listener::{validate_listener_names, validate_listeners},
 };
 use crate::{
-    config::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, Config, InsecureOptions, ProtocolKind},
+    config::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, Config, InsecureOptions, ProtocolKind, SkipPipelineChecks},
     connectivity::normalize_mapped_ipv4,
     errors::ProxyError,
 };
@@ -77,7 +77,7 @@ impl Config {
 
 /// Emit a warning for each active insecure option flag.
 fn warn_active_insecure_options(opts: &InsecureOptions) {
-    let flags = [
+    for (name, active) in [
         ("allow_open_security_filters", opts.allow_open_security_filters),
         ("allow_private_endpoints", opts.allow_private_endpoints),
         ("allow_private_health_checks", opts.allow_private_health_checks),
@@ -87,8 +87,35 @@ fn warn_active_insecure_options(opts: &InsecureOptions) {
         ("allow_unbounded_body", opts.allow_unbounded_body),
         ("csrf_log_only", opts.csrf_log_only),
         ("skip_pipeline_validation", opts.skip_pipeline_validation),
-    ];
-    for (name, active) in flags {
+    ] {
+        if active {
+            warn!(flag = name, "insecure_options flag is active");
+        }
+    }
+    warn_active_pipeline_checks(&opts.skip_pipeline_checks);
+}
+
+/// Emit a warning for each active granular pipeline check skip flag.
+fn warn_active_pipeline_checks(s: &SkipPipelineChecks) {
+    for (name, active) in [
+        ("skip_pipeline_checks.conditional_security", s.conditional_security),
+        (
+            "skip_pipeline_checks.conflicting_cluster_selectors",
+            s.conflicting_cluster_selectors,
+        ),
+        (
+            "skip_pipeline_checks.duplicate_load_balancers",
+            s.duplicate_load_balancers,
+        ),
+        (
+            "skip_pipeline_checks.duplicate_rewrite_filters",
+            s.duplicate_rewrite_filters,
+        ),
+        ("skip_pipeline_checks.duplicate_routers", s.duplicate_routers),
+        ("skip_pipeline_checks.lb_without_router", s.lb_without_router),
+        ("skip_pipeline_checks.misaligned_clusters", s.misaligned_clusters),
+        ("skip_pipeline_checks.unreachable_filters", s.unreachable_filters),
+    ] {
         if active {
             warn!(flag = name, "insecure_options flag is active");
         }

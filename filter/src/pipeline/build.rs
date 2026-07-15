@@ -5,7 +5,11 @@
 
 use std::{collections::HashMap, mem, sync::Arc};
 
-use praxis_core::{config::FilterEntry, id::IdGenerator, time::SystemTimeSource};
+use praxis_core::{
+    config::{FilterEntry, SkipPipelineChecks},
+    id::IdGenerator,
+    time::SystemTimeSource,
+};
 use tracing::{debug, warn};
 
 use super::{FilterPipeline, body::compute_body_capabilities, filter::PipelineFilter};
@@ -105,7 +109,11 @@ impl FilterPipeline {
     /// would cause runtime failures (502s, unreachable filters,
     /// cluster mismatches).
     ///
+    /// Individual checks can be skipped via [`SkipPipelineChecks`]
+    /// flags. Use [`SkipPipelineChecks::default()`] to run all checks.
+    ///
     /// ```
+    /// use praxis_core::config::SkipPipelineChecks;
     /// use praxis_filter::{FailureMode, FilterEntry, FilterPipeline, FilterRegistry};
     ///
     /// let registry = FilterRegistry::with_builtins();
@@ -119,7 +127,8 @@ impl FilterPipeline {
     ///     failure_mode: FailureMode::default(),
     /// }];
     /// let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    /// let errors = pipeline.ordering_errors(&entries, false);
+    /// let no_skip = SkipPipelineChecks::default();
+    /// let errors = pipeline.ordering_errors(&entries, false, &no_skip);
     /// assert!(
     ///     errors
     ///         .iter()
@@ -128,20 +137,42 @@ impl FilterPipeline {
     /// ```
     ///
     /// [`build`]: FilterPipeline::build
-    pub fn ordering_errors(&self, entries: &[FilterEntry], allow_open_security: bool) -> Vec<String> {
+    /// [`SkipPipelineChecks`]: praxis_core::config::SkipPipelineChecks
+    pub fn ordering_errors(
+        &self,
+        entries: &[FilterEntry],
+        allow_open_security: bool,
+        skip: &SkipPipelineChecks,
+    ) -> Vec<String> {
         let names: Vec<&str> = self.filters.iter().map(|pf| pf.filter.name()).collect();
 
         let mut errors = Vec::new();
 
-        super::checks::check_lb_without_cluster_selector(&self.filters, &mut errors);
-        super::checks::check_unconditional_static_response(&names, &self.filters, &mut errors);
-        super::checks::check_conditional_security(&names, &self.filters, &mut errors);
+        if !skip.lb_without_router {
+            super::checks::check_lb_without_cluster_selector(&self.filters, &mut errors);
+        }
+        if !skip.unreachable_filters {
+            super::checks::check_unconditional_static_response(&names, &self.filters, &mut errors);
+        }
+        if !skip.conditional_security {
+            super::checks::check_conditional_security(&names, &self.filters, &mut errors);
+        }
         super::checks::check_open_security_filters(&names, &self.filters, allow_open_security, &mut errors);
-        super::checks::check_duplicate_routers(&names, &mut errors);
-        super::checks::check_duplicate_load_balancers(&names, &mut errors);
-        super::checks::check_conflicting_cluster_selectors(&self.filters, &mut errors);
-        super::checks::check_misaligned_clusters(&self.filters, &mut errors);
-        super::checks::check_duplicate_rewrite_filters(&names, entries, &mut errors);
+        if !skip.duplicate_routers {
+            super::checks::check_duplicate_routers(&names, &mut errors);
+        }
+        if !skip.duplicate_load_balancers {
+            super::checks::check_duplicate_load_balancers(&names, &mut errors);
+        }
+        if !skip.conflicting_cluster_selectors {
+            super::checks::check_conflicting_cluster_selectors(&self.filters, &mut errors);
+        }
+        if !skip.misaligned_clusters {
+            super::checks::check_misaligned_clusters(&self.filters, &mut errors);
+        }
+        if !skip.duplicate_rewrite_filters {
+            super::checks::check_duplicate_rewrite_filters(&names, entries, &mut errors);
+        }
 
         errors
     }

@@ -265,6 +265,16 @@ macro_rules! insecure_flag_pairs {
     };
 }
 
+/// Like [`insecure_flag_pairs!`] but for [`SkipPipelineChecks`] sub-fields,
+/// prefixing each name with `skip_pipeline_checks.`.
+///
+/// [`SkipPipelineChecks`]: praxis_core::config::SkipPipelineChecks
+macro_rules! pipeline_check_pairs {
+    ($old:expr, $new:expr, [$($field:ident),* $(,)?]) => {
+        [$(  (concat!("skip_pipeline_checks.", stringify!($field)), $old.$field, $new.$field)  ),*]
+    };
+}
+
 /// Log a warning when insecure options are newly enabled during a reload.
 ///
 /// Compares each [`InsecureOptions`] flag between the old and new configs.
@@ -286,11 +296,11 @@ fn warn_insecure_option_escalations(old: &Config, new: &Config) {
 }
 
 /// Collect names of insecure flags that transitioned from `false` to `true`.
-fn collect_escalated_flags<'a>(
+fn collect_escalated_flags(
     old: &praxis_core::config::InsecureOptions,
     new: &praxis_core::config::InsecureOptions,
-) -> Vec<&'a str> {
-    insecure_flag_pairs!(
+) -> Vec<&'static str> {
+    let mut result: Vec<&str> = insecure_flag_pairs!(
         old,
         new,
         [
@@ -309,7 +319,37 @@ fn collect_escalated_flags<'a>(
     .into_iter()
     .filter(|(_, old_val, new_val)| !old_val && *new_val)
     .map(|(name, ..)| name)
-    .collect()
+    .collect();
+
+    collect_escalated_pipeline_checks(&old.skip_pipeline_checks, &new.skip_pipeline_checks, &mut result);
+    result
+}
+
+/// Collect escalated granular pipeline check flags.
+fn collect_escalated_pipeline_checks(
+    old: &praxis_core::config::SkipPipelineChecks,
+    new: &praxis_core::config::SkipPipelineChecks,
+    result: &mut Vec<&'static str>,
+) {
+    result.extend(
+        pipeline_check_pairs!(
+            old,
+            new,
+            [
+                conditional_security,
+                conflicting_cluster_selectors,
+                duplicate_load_balancers,
+                duplicate_rewrite_filters,
+                duplicate_routers,
+                lb_without_router,
+                misaligned_clusters,
+                unreachable_filters,
+            ]
+        )
+        .into_iter()
+        .filter(|(_, o, n)| !o && *n)
+        .map(|(name, ..)| name),
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -370,7 +410,7 @@ mod tests {
     };
 
     use praxis_core::{
-        config::{Config, InsecureOptions},
+        config::{Config, InsecureOptions, SkipPipelineChecks},
         health::HealthRegistry,
     };
     use praxis_filter::FilterRegistry;
@@ -882,6 +922,25 @@ filter_chains:
     }
 
     #[test]
+    fn escalation_detects_granular_pipeline_check() {
+        let old = InsecureOptions::default();
+        let new = InsecureOptions {
+            skip_pipeline_checks: SkipPipelineChecks {
+                duplicate_routers: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let escalated = collect_escalated_flags(&old, &new);
+        assert_eq!(
+            escalated,
+            vec!["skip_pipeline_checks.duplicate_routers"],
+            "granular pipeline check escalation should be detected"
+        );
+    }
+
+    #[test]
     fn no_escalation_when_all_already_true() {
         let opts = InsecureOptions {
             allow_open_security_filters: true,
@@ -893,6 +952,7 @@ filter_chains:
             allow_tls_without_sni: true,
             allow_unbounded_body: true,
             csrf_log_only: true,
+            skip_pipeline_checks: SkipPipelineChecks::all(),
             skip_pipeline_validation: true,
         };
 

@@ -34,7 +34,7 @@ pub use cluster::{
 };
 pub use condition::{Condition, ConditionMatch, ResponseCondition, ResponseConditionMatch};
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
-pub use insecure_options::InsecureOptions;
+pub use insecure_options::{InsecureOptions, SkipPipelineChecks};
 pub use listener::{Listener, ListenerTls, ProtocolKind};
 pub use metrics::MetricsConfig;
 use parse::check_yaml_safety;
