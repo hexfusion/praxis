@@ -77,17 +77,18 @@ mod tests {
     use super::*;
 
     fn example_config_path(filename: &str) -> String {
-        format!(
-            "{}/../examples/configs/{filename}",
-            env!("CARGO_MANIFEST_DIR"),
-        )
+        format!("{}/../examples/configs/{filename}", env!("CARGO_MANIFEST_DIR"),)
     }
 
     #[test]
     fn load_and_validate_for_cli_with_valid_config() {
         let path = example_config_path("traffic-management/basic-reverse-proxy.yaml");
         let result = load_and_validate_for_cli(Some(&path));
-        assert!(result.is_ok(), "valid example config should pass: {}", result.unwrap_err());
+        assert!(
+            result.is_ok(),
+            "valid example config should pass: {}",
+            result.unwrap_err()
+        );
     }
 
     #[test]
@@ -116,7 +117,11 @@ mod tests {
     fn run_dump_with_valid_config() {
         let path = example_config_path("traffic-management/basic-reverse-proxy.yaml");
         let result = run_dump(Some(&path));
-        assert!(result.is_ok(), "dump with valid config should succeed: {}", result.unwrap_err());
+        assert!(
+            result.is_ok(),
+            "dump with valid config should succeed: {}",
+            result.unwrap_err()
+        );
     }
 
     #[test]

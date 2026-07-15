@@ -665,8 +665,7 @@ filter_chains:
         write_dump(&dump, &mut buf).unwrap();
 
         let output = String::from_utf8(buf).expect("dump output should be valid UTF-8");
-        let reparsed: serde_yaml::Value =
-            serde_yaml::from_str(&output).expect("dump output should be valid YAML");
+        let reparsed: serde_yaml::Value = serde_yaml::from_str(&output).expect("dump output should be valid YAML");
         let mapping = reparsed.as_mapping().expect("dump should be a YAML mapping");
         assert!(
             mapping.contains_key(&serde_yaml::Value::String("config_source".to_owned())),
