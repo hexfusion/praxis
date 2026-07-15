@@ -64,6 +64,7 @@ pub(crate) fn reload_pipelines(
     log_restart_required_changes(old_config, new_config);
     warn_insecure_option_escalations(old_config, new_config);
     warn_stateful_filter_reset(new_config);
+    log_config_change_audit(old_config, new_config);
 
     let mut swapped = Vec::new();
     let mut skipped = Vec::new();
@@ -389,6 +390,64 @@ fn is_stateful_recursive(f: &praxis_core::config::FilterEntry) -> bool {
             })
         })
     })
+}
+
+// -----------------------------------------------------------------------------
+// Config Change Audit
+// -----------------------------------------------------------------------------
+
+/// Emit a structured audit log summarizing config changes during reload.
+///
+/// Compares old and new configs section by section, reporting the
+/// number of items added, removed, or modified in each. Complements
+/// the specific escalation warnings from [`warn_insecure_option_escalations`]
+/// with a general-purpose change summary for incident investigation
+/// and config drift tracking.
+fn log_config_change_audit(old: &Config, new: &Config) {
+    let (la, lr, lm) = diff_named_items(&old.listeners, &new.listeners, |l| &l.name);
+    let (ca, cr, cm) = diff_named_items(&old.clusters, &new.clusters, |c| &c.name);
+    let (fa, fr, fm) = diff_named_items(&old.filter_chains, &new.filter_chains, |c| &c.name);
+
+    let insecure_changed =
+        serde_yaml::to_string(&old.insecure_options).ok() != serde_yaml::to_string(&new.insecure_options).ok();
+
+    info!(
+        listeners_added = la,
+        listeners_removed = lr,
+        listeners_modified = lm,
+        clusters_added = ca,
+        clusters_removed = cr,
+        clusters_modified = cm,
+        chains_added = fa,
+        chains_removed = fr,
+        chains_modified = fm,
+        insecure_options_changed = insecure_changed,
+        "config reload audit"
+    );
+}
+
+/// Compare two sets of named serializable items and return change counts.
+///
+/// Returns `(added, removed, modified)` where:
+/// - `added` -- items in `new` not present in `old`
+/// - `removed` -- items in `old` not present in `new`
+/// - `modified` -- items present in both with different serialized content
+fn diff_named_items<T: serde::Serialize>(old: &[T], new: &[T], name_fn: impl Fn(&T) -> &str) -> (usize, usize, usize) {
+    use std::collections::HashMap;
+
+    let serialize = |item: &T| serde_yaml::to_string(item).unwrap_or_default();
+
+    let old_map: HashMap<&str, String> = old.iter().map(|i| (name_fn(i), serialize(i))).collect();
+    let new_map: HashMap<&str, String> = new.iter().map(|i| (name_fn(i), serialize(i))).collect();
+
+    let added = new_map.keys().filter(|k| !old_map.contains_key(*k)).count();
+    let removed = old_map.keys().filter(|k| !new_map.contains_key(*k)).count();
+    let modified = new_map
+        .iter()
+        .filter(|(k, v)| old_map.get(*k).is_some_and(|old_v| old_v != *v))
+        .count();
+
+    (added, removed, modified)
 }
 
 // -----------------------------------------------------------------------------
@@ -939,6 +998,183 @@ filter_chains:
             vec!["skip_pipeline_checks.duplicate_routers"],
             "granular pipeline check escalation should be detected"
         );
+    }
+
+    #[test]
+    fn audit_identical_configs_all_zeros() {
+        let config = valid_config();
+        let (a, r, m) = diff_named_items(&config.listeners, &config.listeners, |l| &l.name);
+        assert_eq!((a, r, m), (0, 0, 0), "identical listeners should show no changes");
+
+        let (a, r, m) = diff_named_items(&config.clusters, &config.clusters, |c| &c.name);
+        assert_eq!((a, r, m), (0, 0, 0), "identical clusters should show no changes");
+
+        let (a, r, m) = diff_named_items(&config.filter_chains, &config.filter_chains, |c| &c.name);
+        assert_eq!((a, r, m), (0, 0, 0), "identical chains should show no changes");
+    }
+
+    #[test]
+    fn audit_cluster_added() {
+        let old = valid_config();
+        let new = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80"]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap();
+
+        let (a, r, m) = diff_named_items(&old.clusters, &new.clusters, |c| &c.name);
+        assert_eq!(a, 1, "one cluster should be added");
+        assert_eq!(r, 0, "no clusters should be removed");
+        assert_eq!(m, 0, "no clusters should be modified");
+    }
+
+    #[test]
+    fn audit_cluster_removed() {
+        let old = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80"]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap();
+        let new = valid_config();
+
+        let (a, r, m) = diff_named_items(&old.clusters, &new.clusters, |c| &c.name);
+        assert_eq!(a, 0, "no clusters should be added");
+        assert_eq!(r, 1, "one cluster should be removed");
+        assert_eq!(m, 0, "no clusters should be modified");
+    }
+
+    #[test]
+    fn audit_filter_chain_modified() {
+        let old = valid_config();
+        let new = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 404
+"#,
+        )
+        .unwrap();
+
+        let (a, r, m) = diff_named_items(&old.filter_chains, &new.filter_chains, |c| &c.name);
+        assert_eq!(a, 0, "no chains should be added");
+        assert_eq!(r, 0, "no chains should be removed");
+        assert_eq!(m, 1, "one chain should be modified");
+    }
+
+    #[test]
+    fn audit_insecure_options_change_detected() {
+        let old = valid_config();
+        let mut new = valid_config();
+        new.insecure_options.allow_root = true;
+
+        let changed =
+            serde_yaml::to_string(&old.insecure_options).ok() != serde_yaml::to_string(&new.insecure_options).ok();
+        assert!(changed, "insecure_options change should be detected");
+    }
+
+    #[test]
+    fn audit_insecure_options_identical() {
+        let config = valid_config();
+        let changed = serde_yaml::to_string(&config.insecure_options).ok()
+            != serde_yaml::to_string(&config.insecure_options).ok();
+        assert!(!changed, "identical insecure_options should not flag change");
+    }
+
+    #[test]
+    fn audit_mixed_changes() {
+        let old = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+  - name: api
+    address: "127.0.0.1:9090"
+    filter_chains: [main]
+clusters:
+  - name: old_cluster
+    endpoints: ["10.0.0.1:80"]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap();
+
+        let new = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+  - name: grpc
+    address: "127.0.0.1:7070"
+    filter_chains: [main]
+clusters:
+  - name: new_cluster
+    endpoints: ["10.0.0.2:80"]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 404
+"#,
+        )
+        .unwrap();
+
+        let (la, lr, lm) = diff_named_items(&old.listeners, &new.listeners, |l| &l.name);
+        assert_eq!(la, 1, "one listener added (grpc)");
+        assert_eq!(lr, 1, "one listener removed (api)");
+        assert_eq!(lm, 0, "web listener unchanged");
+
+        let (ca, cr, cm) = diff_named_items(&old.clusters, &new.clusters, |c| &c.name);
+        assert_eq!(ca, 1, "one cluster added (new_cluster)");
+        assert_eq!(cr, 1, "one cluster removed (old_cluster)");
+        assert_eq!(cm, 0, "no clusters modified");
+
+        let (fa, fr, fm) = diff_named_items(&old.filter_chains, &new.filter_chains, |c| &c.name);
+        assert_eq!(fa, 0, "no chains added");
+        assert_eq!(fr, 0, "no chains removed");
+        assert_eq!(fm, 1, "main chain modified (status 200->404)");
+    }
+
+    #[test]
+    fn audit_log_does_not_panic() {
+        let old = valid_config();
+        let new = valid_config();
+        log_config_change_audit(&old, &new);
     }
 
     #[test]

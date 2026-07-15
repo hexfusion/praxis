@@ -66,6 +66,8 @@ impl Config {
         validate_clusters(&self.clusters, &self.insecure_options)?;
         validate_upstream_ca_file(self.runtime.upstream_ca_file.as_deref())?;
         validate_runtime_threads(self.runtime.threads)?;
+        validate_runtime_max_connections(self.runtime.max_connections)?;
+        validate_keepalive_pool_size(self.runtime.upstream_keepalive_pool_size)?;
 
         Ok(())
     }
@@ -271,6 +273,38 @@ fn validate_runtime_threads(threads: usize) -> Result<(), ProxyError> {
     if threads > MAX_THREADS {
         return Err(ProxyError::Config(format!(
             "runtime.threads must be <= {MAX_THREADS}, got {threads}"
+        )));
+    }
+    Ok(())
+}
+
+/// Maximum allowed `upstream_keepalive_pool_size` (10,000 per worker).
+const MAX_KEEPALIVE_POOL_SIZE: usize = 10_000;
+
+/// Reject `runtime.max_connections` values that are zero or above the ceiling.
+fn validate_runtime_max_connections(max_connections: Option<u32>) -> Result<(), ProxyError> {
+    let Some(v) = max_connections else {
+        return Ok(());
+    };
+    if v == 0 {
+        return Err(ProxyError::Config("runtime.max_connections must be >= 1".into()));
+    }
+    if v > super::MAX_CONNECTIONS {
+        return Err(ProxyError::Config(format!(
+            "runtime.max_connections ({v}) exceeds maximum ({})",
+            super::MAX_CONNECTIONS,
+        )));
+    }
+    Ok(())
+}
+
+/// Reject `upstream_keepalive_pool_size` above the ceiling.
+fn validate_keepalive_pool_size(pool_size: Option<usize>) -> Result<(), ProxyError> {
+    if let Some(v) = pool_size
+        && v > MAX_KEEPALIVE_POOL_SIZE
+    {
+        return Err(ProxyError::Config(format!(
+            "runtime.upstream_keepalive_pool_size ({v}) exceeds maximum ({MAX_KEEPALIVE_POOL_SIZE})"
         )));
     }
     Ok(())
@@ -890,5 +924,107 @@ clusters:
             "unique cluster names should be accepted: {:?}",
             config.err()
         );
+    }
+
+    #[test]
+    fn reject_runtime_zero_max_connections() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  max_connections: 0
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("max_connections must be >= 1"),
+            "should reject zero runtime max_connections: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_runtime_max_connections_exceeding_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  max_connections: 1000001
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "should reject runtime max_connections > 1M: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_runtime_max_connections_at_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  max_connections: 1000000
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn reject_keepalive_pool_size_exceeding_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  upstream_keepalive_pool_size: 10001
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "should reject keepalive pool > 10K: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_keepalive_pool_size_at_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  upstream_keepalive_pool_size: 10000
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
     }
 }
