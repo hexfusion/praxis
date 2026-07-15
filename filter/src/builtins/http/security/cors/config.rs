@@ -97,10 +97,15 @@ pub(super) fn validate_config(cfg: &CorsConfig) -> Result<(), crate::FilterError
     validate_wildcard_origins(cfg)
 }
 
-/// Reject credentials + wildcard combinations per Fetch spec.
+/// Reject credentials with wildcards or null origin per Fetch spec.
 fn validate_credentials(cfg: &CorsConfig) -> Result<(), crate::FilterError> {
     if !cfg.allow_credentials {
         return Ok(());
+    }
+    if cfg.allow_null_origin {
+        return Err("cors: allow_credentials is incompatible with allow_null_origin \
+             (null origin enables credential theft from sandboxed contexts)"
+            .into());
     }
     if cfg.allow_origins.iter().any(|o| o == "*") {
         return Err("cors: allow_credentials is incompatible with wildcard allow_origins".into());
