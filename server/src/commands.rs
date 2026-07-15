@@ -76,6 +76,49 @@ fn default_config_source() -> String {
 mod tests {
     use super::*;
 
+    fn example_config_path(filename: &str) -> String {
+        format!(
+            "{}/../examples/configs/{filename}",
+            env!("CARGO_MANIFEST_DIR"),
+        )
+    }
+
+    #[test]
+    fn load_and_validate_for_cli_with_valid_config() {
+        let path = example_config_path("traffic-management/basic-reverse-proxy.yaml");
+        let result = load_and_validate_for_cli(Some(&path));
+        assert!(result.is_ok(), "valid example config should pass: {}", result.unwrap_err());
+    }
+
+    #[test]
+    fn load_and_validate_for_cli_with_missing_file() {
+        let result = load_and_validate_for_cli(Some("/nonexistent/praxis.yaml"));
+        assert!(result.is_err(), "missing config file should fail");
+    }
+
+    #[test]
+    fn load_and_validate_for_cli_with_none_uses_default() {
+        let result = load_and_validate_for_cli(None);
+        assert!(
+            result.is_ok(),
+            "None should fall back to built-in default: {}",
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn default_config_source_fallback() {
+        let source = default_config_source();
+        assert_eq!(source, "<built-in default>", "no praxis.yaml in test cwd");
+    }
+
+    #[test]
+    fn run_dump_with_valid_config() {
+        let path = example_config_path("traffic-management/basic-reverse-proxy.yaml");
+        let result = run_dump(Some(&path));
+        assert!(result.is_ok(), "dump with valid config should succeed: {}", result.unwrap_err());
+    }
+
     #[test]
     fn validate_catches_invalid_log_overrides() {
         let config = Config::from_yaml(
