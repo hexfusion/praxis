@@ -3,6 +3,8 @@
 
 //! TLS settings and SNI hostname validation for clusters.
 
+use std::net::IpAddr;
+
 use tracing::warn;
 
 use crate::{
@@ -92,7 +94,21 @@ fn check_no_verify_requirement(
 /// Validates that an SNI hostname is a legal DNS name.
 fn validate_sni(sni: &str, cluster_name: &str) -> Result<(), ProxyError> {
     validate_sni_length(sni, cluster_name)?;
+    validate_sni_not_ip(sni, cluster_name)?;
     validate_sni_labels(sni, cluster_name)
+}
+
+/// Reject SNI values that are IP addresses rather than hostnames.
+///
+/// TLS SNI is hostname-based; IP addresses bypass certificate hostname
+/// verification and can manipulate which upstream certificate is validated.
+fn validate_sni_not_ip(sni: &str, cluster_name: &str) -> Result<(), ProxyError> {
+    if sni.parse::<IpAddr>().is_ok() {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': sni must be a hostname, not an IP address"
+        )));
+    }
+    Ok(())
 }
 
 /// Reject empty or overlong SNI hostnames.
@@ -214,6 +230,58 @@ mod tests {
             ..Cluster::with_defaults("web", vec!["10.0.0.1:443".into()])
         }];
         validate_clusters(&clusters, &InsecureOptions::default()).unwrap();
+    }
+
+    #[test]
+    fn reject_sni_ipv4_address() {
+        let clusters = vec![Cluster {
+            tls: Some(ClusterTls {
+                sni: Some("192.168.1.1".into()),
+                ..ClusterTls::default()
+            }),
+            ..Cluster::with_defaults("web", vec!["10.0.0.1:443".into()])
+        }];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(err.to_string().contains("IP address"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_sni_ipv4_loopback() {
+        let clusters = vec![Cluster {
+            tls: Some(ClusterTls {
+                sni: Some("127.0.0.1".into()),
+                ..ClusterTls::default()
+            }),
+            ..Cluster::with_defaults("web", vec!["10.0.0.1:443".into()])
+        }];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(err.to_string().contains("IP address"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_sni_ipv6_loopback() {
+        let clusters = vec![Cluster {
+            tls: Some(ClusterTls {
+                sni: Some("::1".into()),
+                ..ClusterTls::default()
+            }),
+            ..Cluster::with_defaults("web", vec!["10.0.0.1:443".into()])
+        }];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(err.to_string().contains("IP address"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_sni_ipv6_full() {
+        let clusters = vec![Cluster {
+            tls: Some(ClusterTls {
+                sni: Some("2001:db8::1".into()),
+                ..ClusterTls::default()
+            }),
+            ..Cluster::with_defaults("web", vec!["10.0.0.1:443".into()])
+        }];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(err.to_string().contains("IP address"), "got: {err}");
     }
 
     #[test]
