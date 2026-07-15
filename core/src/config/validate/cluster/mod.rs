@@ -8,6 +8,8 @@ mod health_check;
 mod timeouts;
 mod tls;
 
+pub use health_check::is_ssrf_sensitive;
+
 use crate::{config::InsecureOptions, errors::ProxyError};
 
 // -----------------------------------------------------------------------------

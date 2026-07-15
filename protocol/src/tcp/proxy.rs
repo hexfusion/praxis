@@ -3,11 +3,12 @@
 
 //! Pingora-backed bidirectional TCP proxy application.
 
-use std::{borrow::Cow, future::Future, io, sync::Arc, time::Duration};
+use std::{borrow::Cow, future::Future, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use pingora_core::{apps::ServerApp, protocols::Stream, server::ShutdownWatch};
+use praxis_core::{config::is_ssrf_sensitive, connectivity::normalize_mapped_ipv4};
 use praxis_filter::{FilterAction, FilterPipeline, TcpFilterContext};
 use praxis_tls::sni;
 use tokio::{
@@ -59,6 +60,9 @@ const SNI_PEEK_TIMEOUT: Duration = Duration::from_secs(5);
 /// [`TcpFilterContext::upstream_addr`]: praxis_filter::TcpFilterContext::upstream_addr
 /// [`ArcSwap`]: arc_swap::ArcSwap
 pub(crate) struct PingoraTcpProxy {
+    /// Bypass runtime SSRF checks on resolved upstream IPs.
+    allow_private_endpoints: bool,
+
     /// Cluster name for load-balanced TCP connections.
     cluster: Option<Arc<str>>,
 
@@ -88,8 +92,10 @@ impl PingoraTcpProxy {
         session_timeout: Option<Duration>,
         max_duration: Option<Duration>,
         connection_semaphore: Option<Arc<Semaphore>>,
+        allow_private_endpoints: bool,
     ) -> Self {
         Self {
+            allow_private_endpoints,
             cluster,
             connection_semaphore,
             session_timeout,
@@ -252,7 +258,7 @@ impl ServerApp for PingoraTcpProxy {
             .run_connect_filters(&remote_addr, &local_addr, sni_hostname.as_deref(), connect_time)
             .await?;
 
-        let mut upstream = connect_upstream(&upstream_addr).await?;
+        let mut upstream = connect_upstream(&upstream_addr, self.allow_private_endpoints).await?;
 
         if !peeked_bytes.is_empty()
             && let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut upstream, &peeked_bytes).await
@@ -470,22 +476,68 @@ async fn forward_no_timeout(
 }
 
 /// Connect to the upstream TCP address with a timeout.
-async fn connect_upstream(upstream_addr: &str) -> Option<TcpStream> {
-    match tokio::time::timeout(UPSTREAM_CONNECT_TIMEOUT, TcpStream::connect(upstream_addr)).await {
-        Ok(Ok(s)) => Some(s),
-        Ok(Err(e)) => {
+///
+/// Resolves DNS before connecting so that the resolved IPs can be
+/// checked against SSRF-sensitive ranges (loopback, link-local).
+/// This prevents DNS rebinding attacks where a hostname resolves to
+/// a safe IP at config time but a sensitive IP at connection time.
+/// The check is skipped when `allow_private` is `true`
+/// (`insecure_options.allow_private_endpoints`).
+async fn connect_upstream(upstream_addr: &str, allow_private: bool) -> Option<TcpStream> {
+    if let Ok(result) = tokio::time::timeout(
+        UPSTREAM_CONNECT_TIMEOUT,
+        resolve_and_connect(upstream_addr, allow_private),
+    )
+    .await
+    {
+        return result;
+    }
+    warn!(
+        upstream = %upstream_addr,
+        timeout_secs = UPSTREAM_CONNECT_TIMEOUT.as_secs(),
+        "TCP upstream connect timed out"
+    );
+    None
+}
+
+/// Resolve, SSRF-check, and connect to an upstream address.
+async fn resolve_and_connect(upstream_addr: &str, allow_private: bool) -> Option<TcpStream> {
+    let addrs: Vec<SocketAddr> = match tokio::net::lookup_host(upstream_addr).await {
+        Ok(iter) => iter.collect(),
+        Err(e) => {
+            warn!(upstream = %upstream_addr, error = %e, "failed to resolve TCP upstream");
+            return None;
+        },
+    };
+
+    if !allow_private && let Some(bad_ip) = find_ssrf_sensitive_addr(&addrs) {
+        warn!(
+            upstream = %upstream_addr,
+            resolved_ip = %bad_ip,
+            "TCP upstream resolved to SSRF-sensitive address; \
+             set insecure_options.allow_private_endpoints to allow"
+        );
+        return None;
+    }
+
+    match TcpStream::connect(addrs.as_slice()).await {
+        Ok(s) => Some(s),
+        Err(e) => {
             warn!(upstream = %upstream_addr, error = %e, "failed to connect to TCP upstream");
             None
         },
-        Err(_) => {
-            warn!(
-                upstream = %upstream_addr,
-                timeout_secs = UPSTREAM_CONNECT_TIMEOUT.as_secs(),
-                "TCP upstream connect timed out"
-            );
-            None
-        },
     }
+}
+
+/// Return the first SSRF-sensitive IP among resolved socket addresses.
+///
+/// Normalizes IPv4-mapped IPv6 addresses before checking so that
+/// `::ffff:127.0.0.1` is correctly identified as loopback.
+fn find_ssrf_sensitive_addr(addrs: &[SocketAddr]) -> Option<std::net::IpAddr> {
+    addrs
+        .iter()
+        .map(|a| normalize_mapped_ipv4(a.ip()))
+        .find(is_ssrf_sensitive)
 }
 
 // -----------------------------------------------------------------------------
@@ -648,6 +700,72 @@ mod tests {
             "NotTls should return Done(None)"
         );
         assert_eq!(buf.len(), filled, "buf should be truncated to filled length");
+    }
+
+    #[test]
+    fn find_ssrf_sensitive_addr_flags_loopback_v4() {
+        let addrs = vec![SocketAddr::from(([127, 0, 0, 1], 80))];
+        let result = find_ssrf_sensitive_addr(&addrs);
+        assert!(result.is_some(), "127.0.0.1 should be flagged as SSRF-sensitive");
+    }
+
+    #[test]
+    fn find_ssrf_sensitive_addr_flags_loopback_v6() {
+        let addrs = vec![SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 80))];
+        let result = find_ssrf_sensitive_addr(&addrs);
+        assert!(result.is_some(), "::1 should be flagged as SSRF-sensitive");
+    }
+
+    #[test]
+    fn find_ssrf_sensitive_addr_flags_link_local_v4() {
+        let addrs = vec![SocketAddr::from(([169, 254, 169, 254], 80))];
+        let result = find_ssrf_sensitive_addr(&addrs);
+        assert!(result.is_some(), "169.254.169.254 (cloud metadata) should be flagged");
+    }
+
+    #[test]
+    fn find_ssrf_sensitive_addr_flags_ipv4_mapped_loopback() {
+        let v6 = "::ffff:127.0.0.1".parse::<std::net::Ipv6Addr>().unwrap();
+        let addrs = vec![SocketAddr::from((v6, 80))];
+        let result = find_ssrf_sensitive_addr(&addrs);
+        assert!(
+            result.is_some(),
+            "::ffff:127.0.0.1 should be flagged after normalization"
+        );
+    }
+
+    #[test]
+    fn find_ssrf_sensitive_addr_allows_public_ip() {
+        let addrs = vec![SocketAddr::from(([8, 8, 8, 8], 443))];
+        let result = find_ssrf_sensitive_addr(&addrs);
+        assert!(result.is_none(), "8.8.8.8 should not be flagged");
+    }
+
+    #[test]
+    fn find_ssrf_sensitive_addr_allows_rfc1918() {
+        let addrs = vec![SocketAddr::from(([10, 0, 0, 1], 80))];
+        let result = find_ssrf_sensitive_addr(&addrs);
+        assert!(result.is_none(), "RFC 1918 addresses should not be flagged");
+    }
+
+    #[test]
+    fn find_ssrf_sensitive_addr_flags_any_sensitive_in_list() {
+        let addrs = vec![
+            SocketAddr::from(([8, 8, 8, 8], 80)),
+            SocketAddr::from(([127, 0, 0, 1], 80)),
+        ];
+        let result = find_ssrf_sensitive_addr(&addrs);
+        assert!(
+            result.is_some(),
+            "should flag when any address in the list is SSRF-sensitive"
+        );
+    }
+
+    #[test]
+    fn find_ssrf_sensitive_addr_returns_none_for_empty() {
+        let addrs: Vec<SocketAddr> = vec![];
+        let result = find_ssrf_sensitive_addr(&addrs);
+        assert!(result.is_none(), "empty list should return None");
     }
 
     // -------------------------------------------------------------------------

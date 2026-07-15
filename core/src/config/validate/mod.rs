@@ -12,6 +12,8 @@ mod filter_chain;
 mod listener;
 mod rules;
 
+pub use cluster::is_ssrf_sensitive;
+
 // ---------------------------------------------------------------------------
 // Shared Name Validation
 // ---------------------------------------------------------------------------

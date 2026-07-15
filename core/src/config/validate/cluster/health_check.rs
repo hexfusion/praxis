@@ -217,7 +217,7 @@ pub(super) fn extract_host(addr: &str) -> &str {
 /// intentionally not flagged.
 ///
 /// [RFC 1918]: https://datatracker.ietf.org/doc/html/rfc1918
-pub(super) fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
+pub fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local(),
         IpAddr::V6(v6) => {
