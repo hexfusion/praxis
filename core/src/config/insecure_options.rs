@@ -28,6 +28,7 @@ use serde::Deserialize;
 /// assert!(!opts.allow_private_health_checks);
 /// assert!(!opts.allow_public_admin);
 /// assert!(!opts.allow_root);
+/// assert!(!opts.allow_tls_no_verify);
 /// assert!(!opts.allow_tls_without_sni);
 /// assert!(!opts.allow_unbounded_body);
 /// assert!(!opts.csrf_log_only);
@@ -63,6 +64,12 @@ pub struct InsecureOptions {
 
     /// Allow running as root (UID 0).
     pub allow_root: bool,
+
+    /// Allow disabling upstream TLS certificate verification (`tls.verify: false`).
+    ///
+    /// Without this flag, setting `verify: false` on a cluster is a hard
+    /// validation error. Enabling it demotes the error to a warning.
+    pub allow_tls_no_verify: bool,
 
     /// Allow TLS without SNI hostname verification.
     pub allow_tls_without_sni: bool,
@@ -116,6 +123,7 @@ mod tests {
         );
         assert!(!opts.allow_public_admin, "allow_public_admin should default to false");
         assert!(!opts.allow_root, "allow_root should default to false");
+        assert!(!opts.allow_tls_no_verify, "allow_tls_no_verify should default to false");
         assert!(
             !opts.allow_tls_without_sni,
             "allow_tls_without_sni should default to false"

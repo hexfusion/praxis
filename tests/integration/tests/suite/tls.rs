@@ -228,6 +228,8 @@ fn upstream_tls_origination_end_to_end() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: plain
     address: "127.0.0.1:{proxy_port}"
@@ -271,6 +273,8 @@ fn both_side_tls_end_to_end() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: secure
     address: "127.0.0.1:{proxy_port}"
@@ -492,6 +496,8 @@ fn upstream_mtls_proxy_presents_client_cert() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: plain
     address: "127.0.0.1:{proxy_port}"
@@ -538,6 +544,8 @@ fn upstream_tls_verify_disabled_with_self_signed() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: plain
     address: "127.0.0.1:{proxy_port}"
@@ -624,6 +632,8 @@ fn sni_derived_from_hostname_address() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: plain
     address: "127.0.0.1:{proxy_port}"
@@ -666,6 +676,8 @@ fn sni_ip_address_leaves_sni_empty() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: plain
     address: "127.0.0.1:{proxy_port}"
@@ -1025,6 +1037,8 @@ fn upstream_mtls_missing_client_cert_returns_502() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: plain
     address: "127.0.0.1:{proxy_port}"
@@ -1329,6 +1343,8 @@ fn full_mtls_listener_and_upstream_end_to_end() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: secure
     address: "127.0.0.1:{proxy_port}"

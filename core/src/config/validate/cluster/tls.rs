@@ -31,13 +31,7 @@ pub(super) fn validate_tls_settings(cluster: &Cluster, insecure_options: &Insecu
     }
 
     check_sni_verify_requirement(tls.sni.is_some(), tls.verify, &cluster.name, insecure_options)?;
-
-    if !tls.verify {
-        warn!(
-            cluster = %cluster.name,
-            "upstream TLS certificate verification is disabled; use only in dev/test environments"
-        );
-    }
+    check_no_verify_requirement(tls.verify, &cluster.name, insecure_options)?;
 
     Ok(())
 }
@@ -63,6 +57,31 @@ fn check_sni_verify_requirement(
     Err(ProxyError::Config(format!(
         "cluster '{cluster_name}': upstream TLS with verification enabled but no sni configured; \
          set tls.sni or set insecure_options.allow_tls_without_sni: true to allow degraded verification"
+    )))
+}
+
+/// Reject `verify: false` unless explicitly opted in via [`InsecureOptions`].
+///
+/// [`InsecureOptions`]: crate::config::InsecureOptions
+fn check_no_verify_requirement(
+    verify: bool,
+    cluster_name: &str,
+    insecure_options: &InsecureOptions,
+) -> Result<(), ProxyError> {
+    if verify {
+        return Ok(());
+    }
+    if insecure_options.allow_tls_no_verify {
+        warn!(
+            cluster = %cluster_name,
+            "upstream TLS certificate verification is disabled \
+             (allowed by insecure_options.allow_tls_no_verify)"
+        );
+        return Ok(());
+    }
+    Err(ProxyError::Config(format!(
+        "cluster '{cluster_name}': upstream TLS certificate verification is disabled (verify: false); \
+         set insecure_options.allow_tls_no_verify: true to allow this"
     )))
 }
 
@@ -375,6 +394,42 @@ mod tests {
     }
 
     #[test]
+    fn reject_tls_no_verify_without_insecure_option() {
+        let clusters = vec![Cluster {
+            tls: Some(ClusterTls {
+                verify: false,
+                ..ClusterTls::default()
+            }),
+            ..Cluster::with_defaults("web", vec!["10.0.0.1:443".into()])
+        }];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("verify: false"),
+            "should reject verify: false without insecure option: {err}"
+        );
+        assert!(
+            err.to_string().contains("allow_tls_no_verify"),
+            "error should mention allow_tls_no_verify: {err}"
+        );
+    }
+
+    #[test]
+    fn allow_tls_no_verify_with_insecure_option() {
+        let clusters = vec![Cluster {
+            tls: Some(ClusterTls {
+                verify: false,
+                ..ClusterTls::default()
+            }),
+            ..Cluster::with_defaults("web", vec!["10.0.0.1:443".into()])
+        }];
+        let opts = InsecureOptions {
+            allow_tls_no_verify: true,
+            ..InsecureOptions::default()
+        };
+        validate_clusters(&clusters, &opts).expect("allow_tls_no_verify should demote error to warning");
+    }
+
+    #[test]
     fn tls_no_verify_not_blocked_by_sni_check() {
         let clusters = vec![Cluster {
             tls: Some(ClusterTls {
@@ -383,6 +438,10 @@ mod tests {
             }),
             ..Cluster::with_defaults("web", vec!["10.0.0.1:443".into()])
         }];
-        validate_clusters(&clusters, &InsecureOptions::default()).expect("TLS without verify should not require SNI");
+        let opts = InsecureOptions {
+            allow_tls_no_verify: true,
+            ..InsecureOptions::default()
+        };
+        validate_clusters(&clusters, &opts).expect("TLS without verify should not require SNI");
     }
 }
