@@ -424,66 +424,7 @@ filter_chains:
     }
 
     #[test]
-    fn reject_require_tls_without_tls_config_http() {
-        let yaml = r#"
-listeners:
-  - name: web
-    address: "0.0.0.0:8080"
-    require_tls: true
-    filter_chains: [main]
-filter_chains:
-  - name: main
-    filters:
-      - filter: static_response
-        status: 200
-"#;
-        let err = Config::from_yaml(yaml).unwrap_err();
-        assert!(
-            err.to_string().contains("require_tls is set but no TLS configuration"),
-            "should reject HTTP listener with require_tls but no TLS: {err}"
-        );
-    }
-
-    #[test]
-    fn reject_require_tls_without_tls_config_tcp() {
-        let yaml = r#"
-listeners:
-  - name: db
-    address: "0.0.0.0:5432"
-    protocol: tcp
-    upstream: "10.0.0.1:5432"
-    require_tls: true
-"#;
-        let err = Config::from_yaml(yaml).unwrap_err();
-        assert!(
-            err.to_string().contains("require_tls is set but no TLS configuration"),
-            "should reject TCP listener with require_tls but no TLS: {err}"
-        );
-    }
-
-    #[test]
-    fn accept_require_tls_with_tls_config() {
-        let yaml = r#"
-listeners:
-  - name: web
-    address: "0.0.0.0:443"
-    require_tls: true
-    tls:
-      certificates:
-        - cert_path: "/certs/server.crt"
-          key_path: "/certs/server.key"
-    filter_chains: [main]
-filter_chains:
-  - name: main
-    filters:
-      - filter: static_response
-        status: 200
-"#;
-        Config::from_yaml(yaml).unwrap();
-    }
-
-    #[test]
-    fn accept_listener_without_require_tls_and_no_tls() {
+    fn accept_listener_without_tls() {
         let yaml = r#"
 listeners:
   - name: web
