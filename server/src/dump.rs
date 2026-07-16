@@ -668,11 +668,11 @@ filter_chains:
         let reparsed: serde_yaml::Value = serde_yaml::from_str(&output).expect("dump output should be valid YAML");
         let mapping = reparsed.as_mapping().expect("dump should be a YAML mapping");
         assert!(
-            mapping.contains_key(&serde_yaml::Value::String("config_source".to_owned())),
+            mapping.contains_key(serde_yaml::Value::String("config_source".to_owned())),
             "dump must contain config_source key"
         );
         assert!(
-            mapping.contains_key(&serde_yaml::Value::String("resolved_listeners".to_owned())),
+            mapping.contains_key(serde_yaml::Value::String("resolved_listeners".to_owned())),
             "dump must contain resolved_listeners key"
         );
     }
