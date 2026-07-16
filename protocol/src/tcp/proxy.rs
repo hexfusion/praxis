@@ -16,7 +16,7 @@ use tokio::{
     net::TcpStream,
     sync::{Semaphore, watch},
 };
-use tracing::{debug, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -263,7 +263,7 @@ impl ServerApp for PingoraTcpProxy {
         if !peeked_bytes.is_empty()
             && let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut upstream, &peeked_bytes).await
         {
-            warn!(upstream = %upstream_addr, error = %e, "failed to write peeked bytes to upstream");
+            error!(upstream = %upstream_addr, error = %e, "failed to write peeked bytes to upstream");
             self.run_disconnect_filters(
                 &remote_addr,
                 &local_addr,
@@ -313,7 +313,7 @@ async fn resolve_connect_result(
             if let Some(addr) = &ctx.upstream_addr {
                 Some(addr.clone().into_owned())
             } else {
-                warn!(remote = %remote_addr, "no upstream address resolved for TCP connection");
+                error!(remote = %remote_addr, "no upstream address resolved for TCP connection");
                 None
             }
         },
@@ -322,7 +322,7 @@ async fn resolve_connect_result(
             None
         },
         Err(e) => {
-            warn!(remote = %remote_addr, error = %e, "TCP connect filter error");
+            error!(remote = %remote_addr, error = %e, "TCP connect filter error");
             None
         },
     }
@@ -493,7 +493,7 @@ async fn connect_upstream(upstream_addr: &str, allow_private: bool) -> Option<Tc
     {
         return result;
     }
-    warn!(
+    error!(
         upstream = %upstream_addr,
         timeout_secs = UPSTREAM_CONNECT_TIMEOUT.as_secs(),
         "TCP upstream connect timed out"
@@ -524,7 +524,7 @@ async fn resolve_and_connect(upstream_addr: &str, allow_private: bool) -> Option
     match TcpStream::connect(addrs.as_slice()).await {
         Ok(s) => Some(s),
         Err(e) => {
-            warn!(upstream = %upstream_addr, error = %e, "failed to connect to TCP upstream");
+            error!(upstream = %upstream_addr, error = %e, "failed to connect to TCP upstream");
             None
         },
     }

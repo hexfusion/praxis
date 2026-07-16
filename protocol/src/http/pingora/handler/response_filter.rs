@@ -5,7 +5,7 @@
 
 use pingora_core::Result;
 use praxis_filter::{FilterAction, FilterPipeline};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use super::super::{context::PingoraRequestCtx, convert::response_header_from_pingora};
 
@@ -22,14 +22,14 @@ use super::super::{context::PingoraRequestCtx, convert::response_header_from_pin
 /// client.
 ///
 /// [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
-#[expect(clippy::too_many_lines, reason = "")]
+#[expect(clippy::too_many_lines, reason = "linear response orchestration")]
 pub(super) async fn execute(
     pipeline: &FilterPipeline,
     upstream_response: &mut pingora_http::ResponseHeader,
     ctx: &mut PingoraRequestCtx,
 ) -> Result<()> {
     if upstream_response.status == 101 && !request_has_upgrade(ctx) {
-        warn!("upstream sent unsolicited 101 without matching request Upgrade header");
+        error!("upstream sent unsolicited 101 without matching request Upgrade header");
         return Err(pingora_core::Error::explain(
             pingora_core::ErrorType::HTTPStatus(502),
             "unsolicited 101 response from upstream",
@@ -139,7 +139,7 @@ fn handle_response_result(
             ))
         },
         Err(e) => {
-            warn!(error = %e, "filter pipeline error during response");
+            error!(error = %e, "filter pipeline error during response");
             Err(pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
                 format!("response filter error: {e}"),

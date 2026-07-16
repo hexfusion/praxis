@@ -377,7 +377,7 @@ impl HttpFilter for PolicyFilter {
         // `require_protocol_metadata: false`.
         let Some(method) = ctx.get_metadata("protocol.method").map(str::to_owned) else {
             if self.cfg.require_protocol_metadata {
-                tracing::warn!(
+                tracing::error!(
                     target: "policy.filter",
                     "no protocol.method in metadata — likely the protocol classifier filter (praxis-ai) \
                      is missing or ordered after `policy` in the chain; rejecting \
@@ -566,7 +566,7 @@ impl HttpFilter for PolicyFilter {
             // redaction and leak the upstream payload. We can't change
             // the already-sent status/headers, but we can replace the
             // body with a deny envelope fitted to the committed length.
-            tracing::warn!(
+            tracing::error!(
                 target: "policy.filter",
                 method = %method,
                 entity = %entity_name,

@@ -29,7 +29,7 @@ use tokio::sync::watch;
 /// [`build_server_config`]: praxis_tls::setup::build_server_config
 /// [`ReloadableCertResolver`]: praxis_tls::reload::ReloadableCertResolver
 /// [`CertWatcher`]: praxis_tls::watcher::CertWatcher
-#[expect(clippy::too_many_lines, reason = "")]
+#[expect(clippy::too_many_lines, reason = "hot-reload vs static TLS branching")]
 pub(crate) fn build_tls_settings(
     tls: &ListenerTls,
     address: &str,
