@@ -3,6 +3,8 @@
 
 //! YAML input safety checks: size limits and alias expansion guards.
 
+use std::path::Path;
+
 use crate::errors::ProxyError;
 
 // -----------------------------------------------------------------------------
@@ -30,7 +32,7 @@ const MAX_EXPANDED_BYTES: usize = 16_777_216;
 /// metadata cannot be read.
 ///
 /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
-pub fn check_file_size(path: &Path) -> Result<(), ProxyError> {
+pub(crate) fn check_file_size(path: &Path) -> Result<(), ProxyError> {
     let meta = std::fs::metadata(path).map_err(|e| {
         let display = path.display();
         ProxyError::Config(format!("failed to read metadata for {display}: {e}"))
