@@ -4,14 +4,16 @@
 //! TLS configuration types: shared primitives and role-specific wrappers.
 
 mod certs;
+mod cipher_suite;
 mod cluster;
 mod listener;
 
 use std::path::{Component, Path};
 
 pub use certs::{CaConfig, CertKeyPair};
+pub use cipher_suite::CipherSuiteId;
 pub use cluster::ClusterTls;
-pub use listener::{CipherSuiteId, ClientCertMode, ListenerTls, TlsVersion};
+pub use listener::{ClientCertMode, ListenerTls, TlsVersion};
 
 use crate::TlsError;
 
