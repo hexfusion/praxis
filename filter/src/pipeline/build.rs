@@ -28,7 +28,6 @@ impl FilterPipeline {
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails to instantiate.
-    #[expect(clippy::too_many_lines, reason = "pipeline construction is inherently sequential")]
     pub fn build(entries: &mut [FilterEntry], registry: &FilterRegistry) -> Result<Self, FilterError> {
         let mut filters = Vec::with_capacity(entries.len());
         for (filter_id, entry) in entries.iter_mut().enumerate() {
@@ -50,20 +49,7 @@ impl FilterPipeline {
             pf.name = entry.name.as_ref().map(|n| Arc::from(n.as_str()));
             filters.push(pf);
         }
-        let body_capabilities = compute_body_capabilities(&filters);
-        let compression = extract_compression_config(&filters);
-
-        Ok(Self {
-            body_capabilities,
-            compression,
-            filters,
-            record_filter_duration_metrics: false,
-            health_registry: None,
-            id_generator: Arc::new(IdGenerator::new()),
-            kv_stores: None,
-            pipeline_extensions: Vec::new(),
-            time_source: Arc::new(SystemTimeSource),
-        })
+        Ok(Self::from_filters(filters))
     }
 
     /// Build a pipeline with branch chain resolution.
@@ -90,19 +76,24 @@ impl FilterPipeline {
         chains: &HashMap<&str, &[FilterEntry]>,
     ) -> Result<Self, FilterError> {
         let filters = super::build_branch::resolve_chain_filters(entries, registry, chains, 0)?;
+        Ok(Self::from_filters(filters))
+    }
+
+    /// Create a pipeline from an already-resolved filter list.
+    fn from_filters(filters: Vec<PipelineFilter>) -> Self {
         let body_capabilities = compute_body_capabilities(&filters);
         let compression = extract_compression_config(&filters);
-        Ok(Self {
+        Self {
             body_capabilities,
             compression,
             filters,
-            record_filter_duration_metrics: false,
             health_registry: None,
             id_generator: Arc::new(IdGenerator::new()),
             kv_stores: None,
             pipeline_extensions: Vec::new(),
+            record_filter_duration_metrics: false,
             time_source: Arc::new(SystemTimeSource),
-        })
+        }
     }
 
     /// Validate the pipeline for structural misconfigurations that

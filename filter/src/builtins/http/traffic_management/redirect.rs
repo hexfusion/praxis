@@ -215,7 +215,7 @@ impl HttpFilter for RedirectFilter {
         let raw_host = ctx
             .request
             .headers
-            .get("host")
+            .get(http::header::HOST)
             .and_then(|v| v.to_str().ok())
             .map(strip_port);
 
@@ -335,17 +335,7 @@ fn is_valid_host_for_redirect(host: &str) -> bool {
         })
 }
 
-/// Strip port from a `Host` header value, handling IPv4 and bracketed IPv6.
-fn strip_port(host: &str) -> &str {
-    if host.starts_with('[') {
-        match host.find(']') {
-            Some(i) => host.get(..=i).unwrap_or(host),
-            None => host,
-        }
-    } else {
-        host.split(':').next().unwrap_or(host)
-    }
-}
+use super::strip_port;
 
 /// Infer the request scheme from headers and connection state.
 ///
