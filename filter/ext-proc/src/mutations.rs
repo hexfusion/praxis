@@ -15,10 +15,11 @@
 use std::{borrow::Cow, collections::HashSet};
 
 use bytes::Bytes;
+use praxis_core::reserved_headers;
 use praxis_filter::{FilterAction, HttpFilterContext, Rejection, TrustedHeaderMutation};
 
 use crate::{
-    Phase,
+    config::Phase,
     proto::envoy::service::{
         common::v3::{HeaderValue, HeaderValueOption, header_value_option::HeaderAppendAction},
         ext_proc::v3::{HeaderMap, HeaderMutation, HeadersResponse, HttpHeaders, ImmediateResponse},
@@ -430,24 +431,18 @@ fn is_request_authority(name: &str) -> bool {
     name.eq_ignore_ascii_case("host")
 }
 
-/// Prefix for Praxis-internal routing and classification headers.
-const RESERVED_HEADER_PREFIX: &str = "x-praxis-";
-
 /// Returns `true` if the header name is a reserved internal Praxis header.
 ///
-/// Headers starting with `x-praxis-` (case-insensitive) are used for
-/// internal routing, classification, and pipeline control. External
-/// processors must not be able to set or remove these headers, as doing
-/// so could manipulate routing decisions, bypass security filters, or
-/// escalate privileges.
+/// Checks all reserved prefixes (`x-praxis-*`, `x-ext-protocol-*`,
+/// `x-ext-agent-*`) case-insensitively. Proto header keys arrive as
+/// arbitrary strings — `http::HeaderName` lowercases them later — so
+/// the check must be case-insensitive to prevent bypass via mixed-case
+/// keys like `X-Praxis-Route`.
 ///
-/// The check is case-insensitive because proto header keys arrive as
-/// arbitrary strings; `http::HeaderName` lowercases them later, so a
-/// mixed-case key like `X-Praxis-Route` would otherwise bypass the
-/// guard and land as `x-praxis-route` in the header map.
+/// [`RESERVED_HEADER_PREFIXES`]: praxis_core::reserved_headers::RESERVED_HEADER_PREFIXES
 fn is_reserved_internal_header(name: &str) -> bool {
-    name.get(..RESERVED_HEADER_PREFIX.len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(RESERVED_HEADER_PREFIX))
+    let lower = name.to_ascii_lowercase();
+    reserved_headers::is_reserved(&lower)
 }
 
 /// Build a [`HeaderValue`] proto with the given key and value.
