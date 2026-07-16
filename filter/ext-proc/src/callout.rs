@@ -17,7 +17,7 @@ use praxis_filter::{FilterAction, FilterError, HttpFilterContext};
 use tonic::transport::Channel;
 
 use crate::{
-    Phase,
+    config::Phase,
     mutations::{apply_headers_response, immediate_to_rejection, request_to_proto_headers, response_to_proto_headers},
     proto::envoy::service::ext_proc::v3::{
         ProcessingRequest, ProcessingResponse, external_processor_client::ExternalProcessorClient, processing_request,

@@ -26,6 +26,7 @@ use praxis_filter::parse_filter_config;
 
 use super::*;
 use crate::{
+    config::{DEFAULT_DEFERRED_CLOSE_TIMEOUT_MS, DEFAULT_MESSAGE_TIMEOUT_MS, DEFAULT_STATUS_ON_ERROR},
     duplex::{ExchangeConfig, ExchangeError, ExchangeEvent, ExtProcExchange},
     mutations,
     proto::envoy::service::{
