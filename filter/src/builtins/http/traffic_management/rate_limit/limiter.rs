@@ -3,16 +3,18 @@
 
 //! Rate limiting logic: token acquisition, eviction, and header generation.
 
-use std::{net::IpAddr, sync::atomic::Ordering};
+use std::{hash::Hash, net::IpAddr, sync::atomic::Ordering};
 
 use dashmap::mapref::entry::Entry;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 
 use super::{
-    HARD_CAP_PER_IP_ENTRIES, HEADER_RATELIMIT_LIMIT, HEADER_RATELIMIT_REMAINING, HEADER_RATELIMIT_RESET,
-    MAX_PER_IP_ENTRIES, PerIpState, RateLimitFilter, RateLimitState,
+    HARD_CAP_PER_IP_ENTRIES, HEADER_RATELIMIT_LIMIT, HEADER_RATELIMIT_REMAINING, HEADER_RATELIMIT_RESET, KeyedState,
+    Limit, MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState,
 };
-use crate::builtins::http::traffic_management::token_bucket::TokenBucket;
+use crate::{
+    AuthenticatedIdentity, builtins::http::traffic_management::token_bucket::TokenBucket, filter::HttpFilterContext,
+};
 
 // -----------------------------------------------------------------------------
 // Token Acquisition
@@ -35,12 +37,12 @@ impl RateLimitFilter {
         reason = "token count truncation"
     )]
     pub(super) fn rate_limit_values(
-        &self,
         remaining: f64,
+        limit: Limit,
         time_source: &dyn praxis_core::time::TimeSource,
     ) -> (String, String, u64) {
         let retry_secs = if remaining < 1.0 {
-            ((1.0 - remaining) / self.rate).ceil().max(1.0) as u64
+            ((1.0 - remaining) / limit.rate).ceil().max(1.0) as u64
         } else {
             0
         };
@@ -55,14 +57,15 @@ impl RateLimitFilter {
     /// Returns the header list and the `Retry-After` seconds. Used by the
     /// cold 429 rejection path; the response path inserts pre-built header
     /// names directly instead.
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "burst fits u64")]
     pub(super) fn rate_limit_headers(
-        &self,
         remaining: f64,
+        limit: Limit,
         time_source: &dyn praxis_core::time::TimeSource,
     ) -> (Vec<(&'static str, String)>, u64) {
-        let (remaining_str, reset_str, retry_secs) = self.rate_limit_values(remaining, time_source);
+        let (remaining_str, reset_str, retry_secs) = Self::rate_limit_values(remaining, limit, time_source);
         let headers = vec![
-            (HEADER_RATELIMIT_LIMIT, self.burst_string.clone()),
+            (HEADER_RATELIMIT_LIMIT, (limit.burst as u64).to_string()),
             (HEADER_RATELIMIT_REMAINING, remaining_str),
             (HEADER_RATELIMIT_RESET, reset_str),
         ];
@@ -89,7 +92,7 @@ impl RateLimitFilter {
     ///
     /// [`DashMap::retain`]: dashmap::DashMap::retain
     /// [`EVICTION_INTERVAL_NANOS`]: super::EVICTION_INTERVAL_NANOS
-    pub(super) fn maybe_evict(&self, state: &PerIpState, now_nanos: u64) {
+    pub(super) fn maybe_evict<K: Eq + Hash>(&self, state: &KeyedState<K>, now_nanos: u64) {
         if !state.claim_eviction_pass(now_nanos) {
             return;
         }
@@ -105,7 +108,7 @@ impl RateLimitFilter {
         let idle_threshold_nanos = (2.0 * self.burst / self.rate * 1_000_000_000.0) as u64;
 
         let mut evicted = 0_usize;
-        state.buckets.retain(|_ip, bucket| {
+        state.buckets.retain(|_key, bucket| {
             let last = bucket.last_refill_nanos();
             if now_nanos.saturating_sub(last) > idle_threshold_nanos {
                 evicted += 1;
@@ -116,8 +119,78 @@ impl RateLimitFilter {
 
         if evicted > 0 {
             let remaining = state.entries.fetch_sub(evicted, Ordering::Relaxed) - evicted;
-            tracing::debug!(evicted, remaining, "rate_limit: evicted stale per-IP entries");
+            tracing::debug!(evicted, remaining, "rate_limit: evicted stale entries");
         }
+    }
+
+    /// Resolve the bucket key for this request from the authenticated
+    /// principal.
+    ///
+    /// Returns `None` for every mode except `per_identity`, and for a
+    /// request that carries no [`AuthenticatedIdentity`]. That extension
+    /// is published only by a trusted authentication filter and its
+    /// fields are read-only outside the crate, so a caller cannot select
+    /// its own bucket.
+    ///
+    /// [`AuthenticatedIdentity`]: crate::AuthenticatedIdentity
+    pub(super) fn principal(&self, ctx: &HttpFilterContext<'_>) -> Option<String> {
+        if !matches!(self.state, RateLimitState::PerIdentity(_)) {
+            return None;
+        }
+        let identity = ctx.extensions.get::<AuthenticatedIdentity>()?;
+        match self.key_claim.as_ref() {
+            Some(claim) => identity.custom_claims().get(claim).cloned(),
+            None => Some(identity.subject_id().to_owned()),
+        }
+    }
+
+    /// The limit as configured, before any per-principal override.
+    pub(super) fn static_limit(&self) -> Limit {
+        Limit {
+            rate: self.rate,
+            burst: self.burst,
+        }
+    }
+
+    /// Resolve the rate and capacity in force for this request.
+    ///
+    /// Under `per_identity` the values can come from claims on the
+    /// validated credential. The identity provider signs them, so the
+    /// limit is asserted by the issuer rather than by the caller, and
+    /// the filter enforces a per-principal limit without holding a
+    /// table of principals.
+    ///
+    /// An absent or unusable claim falls back to the configured limit,
+    /// so a provider that publishes nothing keeps the static behaviour
+    /// rather than no limit at all.
+    pub(super) fn resolve_limit(&self, ctx: &HttpFilterContext<'_>) -> Limit {
+        if !matches!(self.state, RateLimitState::PerIdentity(_)) {
+            return self.static_limit();
+        }
+        let Some(identity) = ctx.extensions.get::<AuthenticatedIdentity>() else {
+            return self.static_limit();
+        };
+
+        let read = |claim: Option<&String>| -> Option<f64> {
+            let raw = identity.custom_claims().get(claim?)?;
+            let parsed = raw.parse::<f64>().ok()?;
+            parsed.is_finite().then_some(parsed)
+        };
+
+        let rate = read(self.rate_claim.as_ref()).unwrap_or(self.rate);
+        let burst = read(self.burst_claim.as_ref()).unwrap_or(self.burst);
+
+        // The same invariants from_config enforces on the static values.
+        // A credential carrying nonsense must not disable the limiter.
+        if rate <= 0.0 || burst < 1.0 || burst < rate {
+            tracing::warn!(
+                rate,
+                burst,
+                "rate_limit: claimed limit is not usable, using configured limit"
+            );
+            return self.static_limit();
+        }
+        Limit { rate, burst }
     }
 
     /// Try to acquire a token for the given request context.
@@ -125,58 +198,84 @@ impl RateLimitFilter {
     /// IPv4-mapped IPv6 addresses are normalized to plain IPv4 before
     /// keying the per-IP map (defense in depth; the Pingora boundary
     /// normalizes too).
-    pub(super) fn try_acquire_for(&self, client_addr: Option<IpAddr>) -> Result<f64, f64> {
+    pub(super) fn try_acquire_for(
+        &self,
+        client_addr: Option<IpAddr>,
+        principal: Option<&str>,
+        limit: Limit,
+    ) -> Result<f64, f64> {
         let now = self.now_nanos();
         match &self.state {
-            RateLimitState::Global(bucket) => Self::acquire_from_bucket(bucket, self.rate, self.burst, now),
-            RateLimitState::PerIp(state) => self.acquire_per_ip(state, client_addr, now),
+            RateLimitState::Global(bucket) => Self::acquire_from_bucket(bucket, limit, now),
+            RateLimitState::PerIp(state) => {
+                let ip = client_addr.map(normalize_mapped_ipv4);
+                if ip.is_none() {
+                    tracing::info!("rate_limit: rejecting request with no client address");
+                }
+                self.acquire_keyed(state, ip, now, limit)
+            },
+            RateLimitState::PerIdentity(state) => {
+                if principal.is_none() {
+                    tracing::info!("rate_limit: rejecting request with no authenticated identity");
+                }
+                self.acquire_keyed(state, principal.map(str::to_owned), now, limit)
+            },
         }
     }
 
-    /// Per-IP token acquisition with hard cap enforcement.
+    /// Keyed token acquisition with hard cap enforcement.
     ///
-    /// Rejects unknown IPs when the map exceeds [`HARD_CAP_PER_IP_ENTRIES`]
-    /// to prevent unbounded memory growth via address rotation.
-    fn acquire_per_ip(&self, state: &PerIpState, client_addr: Option<IpAddr>, now: u64) -> Result<f64, f64> {
-        let Some(ip) = client_addr.map(normalize_mapped_ipv4) else {
-            tracing::info!("rate_limit: rejecting request with no client address");
+    /// A request with no key is rejected rather than given a fresh
+    /// bucket. Granting one would hand every unidentified caller an
+    /// unlimited supply of full buckets, which inverts the point of a
+    /// rate limit.
+    ///
+    /// Unknown keys are rejected once the map exceeds
+    /// [`HARD_CAP_PER_IP_ENTRIES`], preventing unbounded memory growth
+    /// through address or principal rotation.
+    fn acquire_keyed<K: Eq + Hash>(
+        &self,
+        state: &KeyedState<K>,
+        key: Option<K>,
+        now: u64,
+        limit: Limit,
+    ) -> Result<f64, f64> {
+        let Some(key) = key else {
             return Err(0.0);
         };
         self.maybe_evict(state, now);
 
-        if let Some(bucket) = state.buckets.get(&ip) {
-            return Self::acquire_from_bucket(&bucket, self.rate, self.burst, now);
+        if let Some(bucket) = state.buckets.get(&key) {
+            return Self::acquire_from_bucket(&bucket, limit, now);
         }
 
-        // Reject unknown IPs when the map exceeds the hard cap to
-        // prevent unbounded memory growth via address rotation.
         if state.entries() >= HARD_CAP_PER_IP_ENTRIES {
             tracing::warn!(
                 entries = state.entries(),
                 hard_cap = HARD_CAP_PER_IP_ENTRIES,
-                "rate_limit: per-IP map hard cap reached, rejecting new IP"
+                "rate_limit: tracked-entry hard cap reached, rejecting new key"
             );
             return Err(0.0);
         }
 
-        // Insert through the entry API so a genuinely new address can be
+        // Insert through the entry API so a genuinely new key can be
         // distinguished from one another thread inserted concurrently;
         // only the former advances the entry count.
-        match state.buckets.entry(ip) {
-            Entry::Occupied(occupied) => Self::acquire_from_bucket(occupied.get(), self.rate, self.burst, now),
+        match state.buckets.entry(key) {
+            Entry::Occupied(occupied) => Self::acquire_from_bucket(occupied.get(), limit, now),
             Entry::Vacant(vacant) => {
-                let bucket = vacant.insert(TokenBucket::new(self.burst));
+                let bucket = vacant.insert(TokenBucket::new(limit.burst));
                 state.entries.fetch_add(1, Ordering::Relaxed);
-                Self::acquire_from_bucket(&bucket, self.rate, self.burst, now)
+                Self::acquire_from_bucket(&bucket, limit, now)
             },
         }
     }
 
     /// Try to acquire one token from a single bucket.
-    fn acquire_from_bucket(bucket: &TokenBucket, rate: f64, burst: f64, now: u64) -> Result<f64, f64> {
-        match bucket.try_acquire(rate, burst, now) {
+    fn acquire_from_bucket(bucket: &TokenBucket, limit: Limit, now: u64) -> Result<f64, f64> {
+        match bucket.try_acquire(limit.rate, limit.burst, now) {
             Some(remaining) => Ok(remaining),
-            None => Err(bucket.current_tokens(rate, burst, now)),
+            None => Err(bucket.current_tokens(limit.rate, limit.burst, now)),
         }
     }
 
@@ -184,10 +283,10 @@ impl RateLimitFilter {
     ///
     /// Normalizes IPv4-mapped IPv6 addresses before lookup (defense in
     /// depth).
-    pub(super) fn current_remaining(&self, client_addr: Option<IpAddr>) -> f64 {
+    pub(super) fn current_remaining(&self, client_addr: Option<IpAddr>, principal: Option<&str>, limit: Limit) -> f64 {
         let now = self.now_nanos();
         match &self.state {
-            RateLimitState::Global(bucket) => bucket.current_tokens(self.rate, self.burst, now),
+            RateLimitState::Global(bucket) => bucket.current_tokens(limit.rate, limit.burst, now),
             RateLimitState::PerIp(state) => {
                 let Some(ip) = client_addr.map(normalize_mapped_ipv4) else {
                     return 0.0;
@@ -195,7 +294,16 @@ impl RateLimitFilter {
                 state
                     .buckets
                     .get(&ip)
-                    .map_or(self.burst, |b| b.current_tokens(self.rate, self.burst, now))
+                    .map_or(limit.burst, |b| b.current_tokens(limit.rate, limit.burst, now))
+            },
+            RateLimitState::PerIdentity(state) => {
+                let Some(principal) = principal else {
+                    return 0.0;
+                };
+                state
+                    .buckets
+                    .get(principal)
+                    .map_or(limit.burst, |b| b.current_tokens(limit.rate, limit.burst, now))
             },
         }
     }

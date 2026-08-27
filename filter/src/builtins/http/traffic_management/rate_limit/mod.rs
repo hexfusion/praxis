@@ -23,6 +23,7 @@ pub use self::config::RateLimitMode;
 mod tests;
 
 use std::{
+    hash::Hash,
     net::IpAddr,
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     time::Instant,
@@ -86,18 +87,26 @@ enum RateLimitState {
     Global(TokenBucket),
 
     /// Independent bucket per source IP address.
-    PerIp(PerIpState),
+    PerIp(KeyedState<IpAddr>),
+
+    /// Independent bucket per authenticated principal.
+    PerIdentity(KeyedState<String>),
 }
 
 // -----------------------------------------------------------------------------
-// PerIpState
+// KeyedState
 // -----------------------------------------------------------------------------
 
-/// Per-IP buckets plus the bookkeeping that keeps eviction off the
+/// Keyed buckets plus the bookkeeping that keeps eviction off the
 /// per-request path.
-struct PerIpState {
-    /// One token bucket per source address.
-    buckets: DashMap<IpAddr, TokenBucket>,
+///
+/// Generic over the key so `per_ip` and `per_identity` share one
+/// implementation: the eviction cursor, the approximate entry count and
+/// the cap heuristics are properties of a keyed bucket map, not of what
+/// the key happens to be.
+struct KeyedState<K: Eq + Hash> {
+    /// One token bucket per key.
+    buckets: DashMap<K, TokenBucket>,
 
     /// Approximate live entry count.
     ///
@@ -117,14 +126,14 @@ struct PerIpState {
     last_eviction_nanos: AtomicU64,
 }
 
-impl PerIpState {
-    /// Create empty per-IP state.
+impl<K: Eq + Hash> KeyedState<K> {
+    /// Create empty keyed state.
     fn new() -> Self {
         Self::from_buckets(DashMap::new())
     }
 
     /// Wrap an existing bucket map, seeding the entry count from it.
-    fn from_buckets(buckets: DashMap<IpAddr, TokenBucket>) -> Self {
+    fn from_buckets(buckets: DashMap<K, TokenBucket>) -> Self {
         let entries = AtomicUsize::new(buckets.len());
         Self {
             buckets,
@@ -156,25 +165,68 @@ impl PerIpState {
 }
 
 // -----------------------------------------------------------------------------
+// Limit
+// -----------------------------------------------------------------------------
+
+/// The rate and capacity in force for one request.
+///
+/// Constant for `global` and `per_ip`. Resolved per request for
+/// `per_identity`, so one filter instance can hold different limits for
+/// different principals. [`TokenBucket`] takes both per call and stores
+/// neither, so a changed limit applies from the next refill with no
+/// re-provisioning.
+#[derive(Clone, Copy, Debug)]
+struct Limit {
+    /// Tokens replenished per second.
+    rate: f64,
+
+    /// Maximum bucket capacity.
+    burst: f64,
+}
+
+// -----------------------------------------------------------------------------
 // RateLimitFilter
 // -----------------------------------------------------------------------------
 
 /// Token bucket rate limiter that rejects excess traffic with 429.
 ///
-/// Supports `global` (one shared bucket) and `per_ip` (one bucket per
-/// source IP) modes. Rate limit headers (`X-RateLimit-Limit`,
+/// Supports `global` (one shared bucket), `per_ip` (one bucket per
+/// source IP), and `per_identity` (one bucket per authenticated
+/// principal) modes. Rate limit headers (`X-RateLimit-Limit`,
 /// `X-RateLimit-Remaining`, `X-RateLimit-Reset`) are injected into
 /// both 429 rejections and successful responses.
 ///
+/// `per_identity` keys on the [`AuthenticatedIdentity`] a trusted
+/// authentication filter published, so a caller cannot select its own
+/// bucket and the limit survives NAT and replica changes. A request
+/// carrying no authenticated identity is rejected rather than given a
+/// fresh bucket. Its rate and capacity can come from issuer-signed
+/// claims, so one filter instance holds different limits for different
+/// principals without a table of them.
+///
 /// State is all managed locally.
+///
+/// [`AuthenticatedIdentity`]: crate::AuthenticatedIdentity
 ///
 /// # YAML configuration
 ///
 /// ```yaml
 /// filter: rate_limit
-/// mode: per_ip        # "per_ip" or "global"
+/// mode: per_ip        # "global", "per_ip", or "per_identity"
 /// rate: 100           # tokens per second
 /// burst: 200          # max bucket capacity
+/// ```
+///
+/// Keyed on the authenticated principal, with issuer-signed limits:
+///
+/// ```yaml
+/// filter: rate_limit
+/// mode: per_identity
+/// key_claim: grid_site      # optional; defaults to the subject id
+/// rate_claim: grid_rate     # optional; falls back to `rate`
+/// burst_claim: grid_burst   # optional; falls back to `burst`
+/// rate: 10
+/// burst: 20
 /// ```
 ///
 /// # Example
@@ -205,8 +257,14 @@ pub struct RateLimitFilter {
     /// Maximum bucket capacity.
     pub(self) burst: f64,
 
-    /// Pre-formatted burst value for the `X-RateLimit-Limit` header.
-    pub(self) burst_string: String,
+    /// Custom claim naming the bucket, `per_identity` only.
+    pub(self) key_claim: Option<String>,
+
+    /// Custom claim holding the principal's rate, `per_identity` only.
+    pub(self) rate_claim: Option<String>,
+
+    /// Custom claim holding the principal's burst, `per_identity` only.
+    pub(self) burst_claim: Option<String>,
 
     /// Pre-built `X-RateLimit-*` header names, so the response path inserts
     /// them without re-validating the constant names on every response.
@@ -225,6 +283,23 @@ pub struct RateLimitFilter {
     reason = "limiter logic is split into a dedicated module"
 )]
 impl RateLimitFilter {
+    /// Reject claim settings on a mode that cannot use them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any claim field is set outside
+    /// `per_identity`, so a misplaced key fails at startup rather than
+    /// silently limiting the wrong thing.
+    fn validate_claims(cfg: &RateLimitConfig) -> Result<(), FilterError> {
+        if matches!(cfg.mode, RateLimitMode::PerIdentity) {
+            return Ok(());
+        }
+        if cfg.key_claim.is_some() || cfg.rate_claim.is_some() || cfg.burst_claim.is_some() {
+            return Err("rate_limit: key_claim, rate_claim and burst_claim require mode per_identity".into());
+        }
+        Ok(())
+    }
+
     /// Create a rate limit filter from parsed YAML config.
     ///
     /// # Errors
@@ -265,18 +340,22 @@ impl RateLimitFilter {
             return Err("rate_limit: burst must be >= rate".into());
         }
 
+        Self::validate_claims(&cfg)?;
+
         let burst = f64::from(cfg.burst);
         let state = match cfg.mode {
             RateLimitMode::Global => RateLimitState::Global(TokenBucket::new(burst)),
-            RateLimitMode::PerIp => RateLimitState::PerIp(PerIpState::new()),
+            RateLimitMode::PerIp => RateLimitState::PerIp(KeyedState::new()),
+            RateLimitMode::PerIdentity => RateLimitState::PerIdentity(KeyedState::new()),
         };
 
-        let burst_string = cfg.burst.to_string();
         Ok(Box::new(Self {
             state,
             rate: cfg.rate,
             burst,
-            burst_string,
+            key_claim: cfg.key_claim,
+            rate_claim: cfg.rate_claim,
+            burst_claim: cfg.burst_claim,
             // Lowercase literals: HeaderName::from_static panics on uppercase,
             // and HeaderMap stores names lowercased anyway, matching the wire
             // output of the previous from_bytes(HEADER_RATELIMIT_*) path.
@@ -295,14 +374,16 @@ impl HttpFilter for RateLimitFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        match self.try_acquire_for(ctx.client_addr) {
+        let principal = self.principal(ctx);
+        let limit = self.resolve_limit(ctx);
+        match self.try_acquire_for(ctx.client_addr, principal.as_deref(), limit) {
             Ok(_remaining) => Ok(FilterAction::Continue),
             Err(remaining) => {
                 tracing::info!(
                     client = ?ctx.client_addr,
                     "rate_limit: rejecting request (429)"
                 );
-                let (headers, retry_secs) = self.rate_limit_headers(remaining, ctx.time_source);
+                let (headers, retry_secs) = Self::rate_limit_headers(remaining, limit, ctx.time_source);
 
                 let mut rejection = Rejection::status(429).with_header("Retry-After", format!("{retry_secs}"));
                 for (name, value) in headers {
@@ -314,12 +395,19 @@ impl HttpFilter for RateLimitFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let remaining = self.current_remaining(ctx.client_addr);
-        let (remaining_str, reset_str, _retry_secs) = self.rate_limit_values(remaining, ctx.time_source);
+        let principal = self.principal(ctx);
+        let limit = self.resolve_limit(ctx);
+        let remaining = self.current_remaining(ctx.client_addr, principal.as_deref(), limit);
+        let (remaining_str, reset_str, _retry_secs) = Self::rate_limit_values(remaining, limit, ctx.time_source);
 
+        // Formatted per response rather than precomputed: under
+        // `per_identity` the capacity varies by principal, so a cached
+        // string would describe the wrong caller.
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "burst fits u64")]
+        let limit_str = (limit.burst as u64).to_string();
         if let Some(ref mut resp) = ctx.response_header {
             for (name, value) in [
-                (&self.header_limit, self.burst_string.as_str()),
+                (&self.header_limit, limit_str.as_str()),
                 (&self.header_remaining, remaining_str.as_str()),
                 (&self.header_reset, reset_str.as_str()),
             ] {

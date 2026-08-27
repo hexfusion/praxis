@@ -7,7 +7,9 @@ Token bucket rate limiter that rejects excess traffic with 429.
 
 ## Configuration Notes
 
-Supports `global` (one shared bucket) and `per_ip` (one bucket per source IP) modes. Rate limit headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`) are injected into both 429 rejections and successful responses.
+Supports `global` (one shared bucket), `per_ip` (one bucket per source IP), and `per_identity` (one bucket per authenticated principal) modes. Rate limit headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`) are injected into both 429 rejections and successful responses.
+
+`per_identity` keys on the [`AuthenticatedIdentity`] a trusted authentication filter published, so a caller cannot select its own bucket and the limit survives NAT and replica changes. A request carrying no authenticated identity is rejected rather than given a fresh bucket. Its rate and capacity can come from issuer-signed claims, so one filter instance holds different limits for different principals without a table of them.
 
 State is all managed locally.
 
@@ -15,15 +17,18 @@ State is all managed locally.
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `mode` | `global` \| `per_ip` | yes | Whether to use a single global bucket or per-IP buckets. |
+| `mode` | `global` \| `per_ip` \| `per_identity` | yes | How to partition buckets: one shared, per source IP, or per authenticated principal. |
 | `rate` | number | yes | Tokens replenished per second. |
 | `burst` | integer | yes | Maximum bucket capacity. |
+| `key_claim` | string | no | Custom claim naming the bucket, instead of the subject id. Lets several principals share one bucket (a tenant, a site) when the identity carries a coarser grouping than its subject. `per_identity` only. |
+| `rate_claim` | string | no | Custom claim holding this principal's tokens per second. The claim is signed by the identity provider, so the limit is asserted by the issuer rather than by the caller. Falls back to `rate` when absent or unusable. `per_identity` only. |
+| `burst_claim` | string | no | Custom claim holding this principal's bucket capacity. Falls back to `burst` when absent or unusable. `per_identity` only. |
 
 ## Example
 
 ```yaml
 filter: rate_limit
-mode: per_ip        # "per_ip" or "global"
+mode: per_ip        # "global", "per_ip", or "per_identity"
 rate: 100           # tokens per second
 burst: 200          # max bucket capacity
 ```

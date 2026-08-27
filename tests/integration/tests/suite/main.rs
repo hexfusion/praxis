@@ -74,6 +74,8 @@ mod pipelines_admin;
 mod process_logging;
 mod prometheus_metrics;
 mod rate_limit;
+#[cfg(feature = "policy-engine")]
+mod rate_limit_per_identity;
 mod retry;
 mod routing;
 mod security;
