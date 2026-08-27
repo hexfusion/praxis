@@ -9,7 +9,7 @@ use serde::Deserialize;
 // RateLimitMode
 // -----------------------------------------------------------------------------
 
-/// Whether the rate limiter tracks one global bucket or per-IP buckets.
+/// How the rate limiter partitions its token buckets.
 ///
 /// ```
 /// use praxis_filter::RateLimitMode;
@@ -19,6 +19,9 @@ use serde::Deserialize;
 ///
 /// let mode: RateLimitMode = serde_yaml::from_str("per_ip").unwrap();
 /// assert!(matches!(mode, RateLimitMode::PerIp));
+///
+/// let mode: RateLimitMode = serde_yaml::from_str("per_identity").unwrap();
+/// assert!(matches!(mode, RateLimitMode::PerIdentity));
 /// ```
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +31,15 @@ pub enum RateLimitMode {
 
     /// Independent bucket per source IP address.
     PerIp,
+
+    /// Independent bucket per authenticated principal.
+    ///
+    /// Keys on the [`AuthenticatedIdentity`] a trusted authentication
+    /// filter published, so the limit follows a verified identity rather
+    /// than a network address, which survives NAT and multiple replicas.
+    ///
+    /// [`AuthenticatedIdentity`]: crate::AuthenticatedIdentity
+    PerIdentity,
 }
 
 // -----------------------------------------------------------------------------
@@ -38,7 +50,8 @@ pub enum RateLimitMode {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RateLimitConfig {
-    /// Whether to use a single global bucket or per-IP buckets.
+    /// How to partition buckets: one shared, per source IP, or per
+    /// authenticated principal.
     pub mode: RateLimitMode,
 
     /// Tokens replenished per second.
@@ -46,4 +59,26 @@ pub(super) struct RateLimitConfig {
 
     /// Maximum bucket capacity.
     pub burst: u32,
+
+    /// Custom claim naming the bucket, instead of the subject id.
+    ///
+    /// Lets several principals share one bucket (a tenant, a site) when
+    /// the identity carries a coarser grouping than its subject.
+    /// `per_identity` only.
+    #[serde(default)]
+    pub key_claim: Option<String>,
+
+    /// Custom claim holding this principal's tokens per second.
+    ///
+    /// The claim is signed by the identity provider, so the limit is
+    /// asserted by the issuer rather than by the caller. Falls back to
+    /// `rate` when absent or unusable. `per_identity` only.
+    #[serde(default)]
+    pub rate_claim: Option<String>,
+
+    /// Custom claim holding this principal's bucket capacity.
+    ///
+    /// Falls back to `burst` when absent or unusable. `per_identity` only.
+    #[serde(default)]
+    pub burst_claim: Option<String>,
 }

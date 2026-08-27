@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 
 use super::{
-    EVICTION_INTERVAL_NANOS, HARD_CAP_PER_IP_ENTRIES, MAX_PER_IP_ENTRIES, PerIpState, RateLimitFilter, RateLimitState,
+    EVICTION_INTERVAL_NANOS, HARD_CAP_PER_IP_ENTRIES, KeyedState, MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState,
 };
 use crate::{FilterAction, builtins::http::traffic_management::token_bucket::TokenBucket, filter::HttpFilter as _};
 
@@ -305,13 +305,14 @@ fn per_ip_eviction_skips_when_below_threshold() {
         map.insert(ip, bucket);
     }
 
-    let state = PerIpState::from_buckets(map);
+    let state = KeyedState::from_buckets(map);
     let filter = RateLimitFilter {
-        state: RateLimitState::PerIp(PerIpState::new()),
+        state: RateLimitState::PerIp(KeyedState::new()),
+        key_claim: None,
+        rate_claim: None,
+        burst_claim: None,
         rate,
         burst,
-        burst_string: (burst as u64).to_string(),
-        burst_value: http::header::HeaderValue::from(burst as u64),
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
         header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
         header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
@@ -324,7 +325,7 @@ fn per_ip_eviction_skips_when_below_threshold() {
 
 #[test]
 fn eviction_pass_is_claimed_at_most_once_per_interval() {
-    let state = PerIpState::new();
+    let state: KeyedState<IpAddr> = KeyedState::new();
     let first = EVICTION_INTERVAL_NANOS;
 
     assert!(
@@ -451,11 +452,12 @@ fn hard_cap_rejects_new_ips() {
     assert_eq!(map.len(), HARD_CAP_PER_IP_ENTRIES, "map should be exactly at hard cap");
 
     let filter = RateLimitFilter {
-        state: RateLimitState::PerIp(PerIpState::from_buckets(map)),
+        state: RateLimitState::PerIp(KeyedState::from_buckets(map)),
+        key_claim: None,
+        rate_claim: None,
+        burst_claim: None,
         rate,
         burst,
-        burst_string: (burst as u64).to_string(),
-        burst_value: http::header::HeaderValue::from(burst as u64),
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
         header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
         header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
@@ -463,7 +465,7 @@ fn hard_cap_rejects_new_ips() {
     };
 
     let novel_ip: IpAddr = "192.168.1.1".parse().unwrap();
-    let result = filter.try_acquire_for(Some(novel_ip));
+    let result = filter.try_acquire_for(Some(novel_ip), None, filter.static_limit());
     assert!(result.is_err(), "new IP should be rejected when map is at hard cap");
 }
 
@@ -486,18 +488,19 @@ fn hard_cap_allows_known_ips() {
     assert_eq!(map.len(), HARD_CAP_PER_IP_ENTRIES, "map should be exactly at hard cap");
 
     let filter = RateLimitFilter {
-        state: RateLimitState::PerIp(PerIpState::from_buckets(map)),
+        state: RateLimitState::PerIp(KeyedState::from_buckets(map)),
+        key_claim: None,
+        rate_claim: None,
+        burst_claim: None,
         rate,
         burst,
-        burst_string: (burst as u64).to_string(),
-        burst_value: http::header::HeaderValue::from(burst as u64),
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
         header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
         header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
         epoch: Instant::now(),
     };
 
-    let result = filter.try_acquire_for(Some(known_ip));
+    let result = filter.try_acquire_for(Some(known_ip), None, filter.static_limit());
     assert!(result.is_ok(), "already-tracked IP should still be allowed at hard cap");
 }
 
@@ -525,7 +528,7 @@ fn eviction_reclaims_below_soft_cap() {
 fn rate_limit_headers_saturate_near_u64_max() {
     let ts = praxis_core::time::FixedTimeSource::new(std::time::Duration::from_secs(u64::MAX - 1));
     let filter = make_filter("global", 10.0, 10);
-    let (headers, _retry_secs) = filter.rate_limit_headers(0.0, &ts);
+    let (headers, _retry_secs) = RateLimitFilter::rate_limit_headers(0.0, filter.static_limit(), &ts);
     let reset_val = &headers.iter().find(|(n, _)| *n == "X-RateLimit-Reset").unwrap().1;
     let reset_unix: u64 = reset_val.parse().expect("X-RateLimit-Reset should be numeric");
     assert_eq!(
@@ -586,8 +589,8 @@ fn from_config_rejects_negative_infinity_rate() {
 // -----------------------------------------------------------------------------
 
 /// Populate a [`DashMap`] with `count` stale entries (last activity at t=0).
-fn populate_stale_state(count: usize, rate: f64, burst: f64) -> PerIpState {
-    PerIpState::from_buckets(populate_stale_map(count, rate, burst))
+fn populate_stale_state(count: usize, rate: f64, burst: f64) -> KeyedState<IpAddr> {
+    KeyedState::from_buckets(populate_stale_map(count, rate, burst))
 }
 
 /// Build a per-IP map of `count` fully idle buckets.
@@ -608,11 +611,12 @@ fn populate_stale_map(count: usize, rate: f64, burst: f64) -> DashMap<IpAddr, To
 /// Build a [`RateLimitFilter`] with a throwaway per-IP map for eviction tests.
 fn make_eviction_filter(rate: f64, burst: f64) -> RateLimitFilter {
     RateLimitFilter {
-        state: RateLimitState::PerIp(PerIpState::new()),
+        state: RateLimitState::PerIp(KeyedState::new()),
+        key_claim: None,
+        rate_claim: None,
+        burst_claim: None,
         rate,
         burst,
-        burst_string: (burst as u64).to_string(),
-        burst_value: http::header::HeaderValue::from(burst as u64),
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
         header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
         header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
@@ -623,20 +627,185 @@ fn make_eviction_filter(rate: f64, burst: f64) -> RateLimitFilter {
 /// Build a [`RateLimitFilter`] directly (bypassing YAML parsing).
 fn make_filter(mode: &str, rate: f64, burst: u32) -> RateLimitFilter {
     let burst_f = f64::from(burst);
+    let keyed = mode == "per_identity";
     let state = match mode {
         "global" => RateLimitState::Global(TokenBucket::new(burst_f)),
-        "per_ip" => RateLimitState::PerIp(PerIpState::new()),
+        "per_ip" => RateLimitState::PerIp(KeyedState::new()),
+        "per_identity" => RateLimitState::PerIdentity(KeyedState::new()),
         _ => panic!("invalid mode in test utility"),
     };
     RateLimitFilter {
         state,
+        key_claim: None,
+        rate_claim: keyed.then(|| "grid_rate".to_owned()),
+        burst_claim: keyed.then(|| "grid_burst".to_owned()),
         rate,
         burst: burst_f,
-        burst_string: u64::from(burst).to_string(),
-        burst_value: http::header::HeaderValue::from(u64::from(burst)),
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
         header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
         header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
         epoch: Instant::now(),
     }
+}
+
+// -----------------------------------------------------------------------------
+// per_identity mode
+// -----------------------------------------------------------------------------
+
+/// Build a context carrying an authenticated principal and its claims.
+fn ctx_with_identity<'a>(
+    req: &'a crate::context::Request,
+    subject: &str,
+    claims: &[(&str, &str)],
+) -> crate::filter::HttpFilterContext<'a> {
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    let identity = crate::AuthenticatedIdentity::new(
+        subject.to_owned(),
+        Vec::new(),
+        Vec::new(),
+        claims.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())),
+    )
+    .expect("non-empty subject yields an identity");
+    ctx.extensions.insert(identity);
+    ctx
+}
+
+#[test]
+fn from_config_parses_per_identity() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: per_identity\nrate: 2\nburst: 4").unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).unwrap();
+    assert_eq!(filter.name(), "rate_limit", "filter name should be rate_limit");
+}
+
+#[test]
+fn from_config_rejects_claim_fields_outside_per_identity() {
+    for mode in ["global", "per_ip"] {
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&format!("mode: {mode}\nkey_claim: grid_site\nrate: 2\nburst: 4")).unwrap();
+        let err = RateLimitFilter::from_config(&yaml)
+            .err()
+            .unwrap_or_else(|| panic!("{mode} with a key_claim should error"));
+        assert!(
+            err.to_string().contains("require mode per_identity"),
+            "{mode} should reject a key_claim: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn per_identity_isolates_principals() {
+    let filter = make_filter("per_identity", 10.0, 1);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut ctx = ctx_with_identity(&req, "spiffe://grid.example/site/site-a", &[]);
+    let first = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(first, FilterAction::Continue), "site-a's first should pass");
+
+    let mut ctx = ctx_with_identity(&req, "spiffe://grid.example/site/site-a", &[]);
+    let second = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&second, FilterAction::Reject(r) if r.status == 429),
+        "site-a's second should exhaust its own bucket"
+    );
+
+    let mut ctx = ctx_with_identity(&req, "spiffe://grid.example/site/site-b", &[]);
+    let other = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(other, FilterAction::Continue),
+        "site-b should hold a bucket independent of site-a"
+    );
+}
+
+#[tokio::test]
+async fn per_identity_rejects_an_unauthenticated_request() {
+    let filter = make_filter("per_identity", 10.0, 100);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.client_addr = Some("10.0.0.1".parse().unwrap());
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(r) if r.status == 429),
+        "no authenticated identity means no bucket, not a fresh one"
+    );
+}
+
+#[tokio::test]
+async fn per_identity_applies_a_different_limit_per_principal() {
+    // One filter, one configured default, two principals whose issuer
+    // signed different limits. A single static rate and burst pair
+    // cannot express this.
+    let filter = make_filter("per_identity", 100.0, 100);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let small = [("grid_rate", "1"), ("grid_burst", "1")];
+    let mut ctx = ctx_with_identity(&req, "site-a", &small);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "site-a's first should pass"
+    );
+    let mut ctx = ctx_with_identity(&req, "site-a", &small);
+    assert!(
+        matches!(&filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
+        "site-a should be held to its claimed burst of 1"
+    );
+
+    let large = [("grid_rate", "10"), ("grid_burst", "10")];
+    for i in 0..3 {
+        let mut ctx = ctx_with_identity(&req, "site-b", &large);
+        assert!(
+            matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+            "site-b request {i} should pass under its own larger claimed limit"
+        );
+    }
+}
+
+#[tokio::test]
+async fn per_identity_ignores_an_unusable_claimed_limit() {
+    // Each case violates an invariant from_config enforces on the
+    // static values, so each must fall back to the configured burst of
+    // 1 rather than disabling the limiter.
+    for (rate, burst, why) in [
+        ("0", "5", "a zero rate would never refill"),
+        ("-1", "5", "a negative rate is not a rate"),
+        ("nonsense", "5", "an unparseable rate"),
+        ("10", "2", "burst below rate"),
+        ("10", "0", "a zero burst admits nothing"),
+    ] {
+        let filter = make_filter("per_identity", 10.0, 1);
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let claims = [("grid_rate", rate), ("grid_burst", burst)];
+
+        let mut ctx = ctx_with_identity(&req, "site-a", &claims);
+        assert!(
+            matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+            "{why}: first should pass"
+        );
+        let mut ctx = ctx_with_identity(&req, "site-a", &claims);
+        assert!(
+            matches!(&filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
+            "{why}: must fall back to the configured limit"
+        );
+    }
+}
+
+#[tokio::test]
+async fn per_identity_can_group_principals_by_claim() {
+    // Two distinct subjects sharing one grid_site claim share a bucket:
+    // the limit follows the group the issuer named, not the subject.
+    let mut filter = make_filter("per_identity", 10.0, 1);
+    filter.key_claim = Some("grid_site".to_owned());
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut ctx = ctx_with_identity(&req, "subject-one", &[("grid_site", "site-a")]);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "the first caller in site-a should pass"
+    );
+
+    let mut ctx = ctx_with_identity(&req, "subject-two", &[("grid_site", "site-a")]);
+    assert!(
+        matches!(&filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
+        "a different subject in the same site should draw from the same bucket"
+    );
 }

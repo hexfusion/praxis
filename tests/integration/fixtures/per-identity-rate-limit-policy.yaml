@@ -1,0 +1,43 @@
+# Policy fixture for the `per_identity` rate limiting integration test.
+#
+# One HS256 JWT identity plugin, fail-closed, and a `global` policy that
+# admits any authenticated caller. Authorization is deliberately trivial:
+# the test is about what happens *after* identity is established, namely
+# that `rate_limit` buckets by the authenticated principal and honours
+# the per-principal limits the issuer signed into the token.
+#
+# The claims that matter here are `grid_site`, `grid_rate` and
+# `grid_burst`. The standard claim mapper puts every unmapped claim on
+# the subject, and the policy filter projects those onto the
+# `AuthenticatedIdentity` extension that `rate_limit` reads.
+#
+# Production deployments swap HS256 for RS256 + JWKS.
+
+plugin_settings:
+  routing_enabled: true
+
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "https://idp.example.com"
+          audiences: ["praxis-rate-limit-example"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT"
+      claim_mapper: standard
+
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"
+  response:
+    status: 401
+    body: "{\"error\":\"authentication required\"}"
