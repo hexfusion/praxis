@@ -3366,6 +3366,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "x509-parser 0.16.0",
  "yaml_serde",
  "zeroize",
 ]
@@ -3660,8 +3661,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-cache"
 version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a820a1a3e59644b38bc03606b638b41f1c5a474215efcec37f94b15871a7e1c"
+source = "git+https://github.com/hexfusion/pingora?rev=28acf2264c645cdac791c330d488d9023e25dfba#28acf2264c645cdac791c330d488d9023e25dfba"
 dependencies = [
  "ahash",
  "async-trait",
@@ -3695,8 +3695,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-core"
 version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7d6d9e04414ba6819c51ec210eddf17865c505431a492c86c6356338c2b4f60"
+source = "git+https://github.com/hexfusion/pingora?rev=28acf2264c645cdac791c330d488d9023e25dfba#28acf2264c645cdac791c330d488d9023e25dfba"
 dependencies = [
  "ahash",
  "async-trait",
@@ -3749,14 +3748,12 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-error"
 version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8af30024450d6dc4785ccadf33e7cfd91f837bc6a226f133f9e77b397b4206c5"
+source = "git+https://github.com/hexfusion/pingora?rev=28acf2264c645cdac791c330d488d9023e25dfba#28acf2264c645cdac791c330d488d9023e25dfba"
 
 [[package]]
 name = "quixotic-plecostomus-header-serde"
 version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9fe7db0e7899a6b2d2cf06e71adacfad4c1bcfe3b5f238494dd3b3eafb2c1b1"
+source = "git+https://github.com/hexfusion/pingora?rev=28acf2264c645cdac791c330d488d9023e25dfba#28acf2264c645cdac791c330d488d9023e25dfba"
 dependencies = [
  "bytes",
  "http",
@@ -3771,8 +3768,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-http"
 version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f337131150ff271246df2584da8bdb0280b8424646d2c76e3926faa70409dc9"
+source = "git+https://github.com/hexfusion/pingora?rev=28acf2264c645cdac791c330d488d9023e25dfba#28acf2264c645cdac791c330d488d9023e25dfba"
 dependencies = [
  "bytes",
  "http",
@@ -3782,8 +3778,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-lru"
 version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec55d3bcbd56e52b3424bc62739a237d43c14df8ed04aaf294ae187b60da348a"
+source = "git+https://github.com/hexfusion/pingora?rev=28acf2264c645cdac791c330d488d9023e25dfba#28acf2264c645cdac791c330d488d9023e25dfba"
 dependencies = [
  "arrayvec 0.7.8",
  "hashbrown 0.17.1",
@@ -3794,8 +3789,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-pool"
 version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6383d2998b2298a0f34bb8a7330f5fea4bb0fb55671db2dc788b5f703c2009f"
+source = "git+https://github.com/hexfusion/pingora?rev=28acf2264c645cdac791c330d488d9023e25dfba#28acf2264c645cdac791c330d488d9023e25dfba"
 dependencies = [
  "crossbeam-queue",
  "dashmap 5.5.3",
@@ -3810,8 +3804,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-proxy"
 version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a953dcda74a2c196497ddc7892e571cdaa0bdb8acc8f7afb6d7b97339b28c658"
+source = "git+https://github.com/hexfusion/pingora?rev=28acf2264c645cdac791c330d488d9023e25dfba#28acf2264c645cdac791c330d488d9023e25dfba"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3833,8 +3826,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-runtime"
 version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51621ff504cfde18409889d6d5b8773e0b0de0e4defa610006a36c27adc06a10"
+source = "git+https://github.com/hexfusion/pingora?rev=28acf2264c645cdac791c330d488d9023e25dfba#28acf2264c645cdac791c330d488d9023e25dfba"
 dependencies = [
  "log",
  "once_cell",
@@ -3847,8 +3839,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-rustls"
 version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc6ba2674ecab001d9ebdc6dc9944326857c07f9c65e7c0779f25db17f96ee84"
+source = "git+https://github.com/hexfusion/pingora?rev=28acf2264c645cdac791c330d488d9023e25dfba#28acf2264c645cdac791c330d488d9023e25dfba"
 dependencies = [
  "log",
  "no_debug",
@@ -3864,8 +3855,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-timeout"
 version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f76d183bcbdae3c0f4b0547e0fb7afdc658853a5e7421bbae1b59e48c25e667"
+source = "git+https://github.com/hexfusion/pingora?rev=28acf2264c645cdac791c330d488d9023e25dfba#28acf2264c645cdac791c330d488d9023e25dfba"
 dependencies = [
  "once_cell",
  "parking_lot",

@@ -112,6 +112,7 @@ pub(in crate::http) async fn execute(
                 cert_digest: d.cert_digest.clone(),
                 organization: d.organization.clone(),
                 serial_number: d.serial_number.clone(),
+                uri_sans: d.uri_sans.clone(),
             })
         })
         .map(Arc::new);

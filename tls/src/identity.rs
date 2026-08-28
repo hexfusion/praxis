@@ -11,8 +11,6 @@
 /// authenticated peer without parsing certificates themselves.
 ///
 /// Fields are extracted from Pingora's SSL digest during request setup.
-/// SAN (Subject Alternative Name) and SPIFFE identity parsing are not
-/// yet included and are planned for a follow-up.
 ///
 /// ```
 /// use praxis_tls::TlsPeerIdentity;
@@ -21,6 +19,7 @@
 ///     cert_digest: vec![0xAB, 0xCD],
 ///     organization: Some("example-org".to_owned()),
 ///     serial_number: Some("12345".to_owned()),
+///     uri_sans: Vec::new(),
 /// };
 /// assert_eq!(identity.hex_digest(), "abcd");
 /// assert_eq!(identity.organization.as_deref(), Some("example-org"));
@@ -35,9 +34,50 @@ pub struct TlsPeerIdentity {
 
     /// Certificate serial number as a decimal string, if present.
     pub serial_number: Option<String>,
+
+    /// URI subject alternative names from the certificate.
+    ///
+    /// This is where a SPIFFE ID is carried. Unlike `organization`, it
+    /// distinguishes two peers signed by the same certificate authority.
+    pub uri_sans: Vec<String>,
 }
 
 impl TlsPeerIdentity {
+    /// The single URI SAN naming this peer, if it has exactly one.
+    ///
+    /// A SPIFFE certificate carries exactly one URI SAN. A certificate
+    /// presenting several is refused rather than chosen between: a
+    /// matcher that accepted any entry would let one certificate
+    /// authenticate as either name.
+    ///
+    /// ```
+    /// use praxis_tls::TlsPeerIdentity;
+    ///
+    /// let one = TlsPeerIdentity {
+    ///     cert_digest: vec![0xAB],
+    ///     organization: None,
+    ///     serial_number: None,
+    ///     uri_sans: vec!["spiffe://grid.internal/site/pool-a".to_owned()],
+    /// };
+    /// assert_eq!(one.spiffe_id(), Some("spiffe://grid.internal/site/pool-a"));
+    ///
+    /// let two = TlsPeerIdentity {
+    ///     uri_sans: vec![
+    ///         "spiffe://g/site/a".to_owned(),
+    ///         "spiffe://g/site/b".to_owned(),
+    ///     ],
+    ///     ..one
+    /// };
+    /// assert_eq!(two.spiffe_id(), None, "two names name nobody");
+    /// ```
+    #[must_use]
+    pub fn spiffe_id(&self) -> Option<&str> {
+        match self.uri_sans.as_slice() {
+            [only] => Some(only.as_str()),
+            _ => None,
+        }
+    }
+
     /// Lowercase hex-encoded certificate digest for logging and
     /// config display.
     ///
@@ -48,6 +88,7 @@ impl TlsPeerIdentity {
     ///     cert_digest: vec![0xDE, 0xAD, 0xBE, 0xEF],
     ///     organization: None,
     ///     serial_number: None,
+    ///     uri_sans: Vec::new(),
     /// };
     /// assert_eq!(id.hex_digest(), "deadbeef");
     /// ```
@@ -82,6 +123,7 @@ mod tests {
             cert_digest: vec![],
             organization: None,
             serial_number: None,
+            uri_sans: Vec::new(),
         };
         assert_eq!(id.hex_digest(), "", "empty digest should produce empty string");
     }
@@ -92,6 +134,7 @@ mod tests {
             cert_digest: vec![0_u8; 32],
             organization: None,
             serial_number: None,
+            uri_sans: Vec::new(),
         };
         let hex = id.hex_digest();
         assert_eq!(hex.len(), 64, "32-byte digest should produce 64 hex chars");
@@ -105,6 +148,7 @@ mod tests {
             cert_digest: vec![0x00; 4],
             organization: None,
             serial_number: None,
+            uri_sans: Vec::new(),
         };
         assert_eq!(
             id.hex_digest(),
@@ -119,6 +163,7 @@ mod tests {
             cert_digest: vec![0xFF; 4],
             organization: None,
             serial_number: None,
+            uri_sans: Vec::new(),
         };
         assert_eq!(id.hex_digest(), "ffffffff", "all-0xFF bytes should produce all-f hex");
     }
