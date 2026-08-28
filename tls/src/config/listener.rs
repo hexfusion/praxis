@@ -300,6 +300,15 @@ pub enum ClientCertMode {
 
     /// Require a valid client certificate; reject connections without one.
     Require,
+
+    /// Require a valid client certificate that names its bearer.
+    ///
+    /// The certificate must carry exactly one SPIFFE URI SAN. One
+    /// certificate authority signs every peer in a mesh, so a chain
+    /// that validates proves membership; the name is what tells two
+    /// members apart. Rejecting here ends the handshake, so an unnamed
+    /// peer never sends a request.
+    RequireNamed,
 }
 
 // -----------------------------------------------------------------------------

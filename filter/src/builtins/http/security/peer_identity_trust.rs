@@ -23,6 +23,9 @@ const MAX_TRUSTED_PEERS: usize = 256;
 /// Lowercase SHA-256 certificate digest length in hexadecimal characters.
 const SHA256_HEX_DIGEST_LEN: usize = 64;
 
+/// Required scheme for a SPIFFE ID.
+const SPIFFE_SCHEME: &str = "spiffe://";
+
 // -----------------------------------------------------------------------------
 // Config
 // -----------------------------------------------------------------------------
@@ -60,6 +63,12 @@ struct TrustedPeerConfig {
 
     /// Certificate serial number.
     serial_number: Option<String>,
+
+    /// SPIFFE ID carried in the certificate's URI SAN.
+    ///
+    /// The strongest match field: it names the peer, and unlike
+    /// `cert_digest` it survives reissue.
+    spiffe_id: Option<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -77,12 +86,17 @@ struct TrustedPeerConfig {
 /// All configured fields on an entry must match the peer identity
 /// for that entry to accept the request.
 ///
-/// `cert_digest` (the SHA-256 hex digest of the peer certificate)
-/// is the strongest static match field. `organization` and
-/// `serial_number` are weaker and are primarily useful for
-/// bootstrap or controlled test configurations where cert digests
-/// are not known ahead of time. SAN/SPIFFE identity matching is
-/// planned for a follow-up.
+/// `spiffe_id` names the peer and is the field to prefer: one
+/// certificate authority signs every peer, so `organization` is
+/// identical across them, while `cert_digest` and `serial_number`
+/// change on every reissue and so are pinning rather than identity.
+/// `organization` and `serial_number` remain useful for bootstrap
+/// and controlled test configurations.
+///
+/// A `spiffe_id` is compared in full, including the trust domain,
+/// and only against a certificate presenting exactly one URI SAN.
+/// There is no prefix or wildcard form: an authorized name is a
+/// prefix of longer ones.
 ///
 /// # YAML configuration
 ///
@@ -108,6 +122,9 @@ struct TrustedPeer {
 
     /// Certificate serial number.
     serial_number: Option<String>,
+
+    /// SPIFFE ID from the certificate's URI SAN.
+    spiffe_id: Option<String>,
 }
 
 impl PeerIdentityTrustFilter {
@@ -172,8 +189,9 @@ fn validate_peers(raw: Vec<TrustedPeerConfig>) -> Result<Vec<TrustedPeer>, Filte
         validate_cert_digest_field(&format!("trusted_peers[{i}].cert_digest"), p.cert_digest.as_ref())?;
         validate_optional_field(&format!("trusted_peers[{i}].organization"), p.organization.as_ref())?;
         validate_optional_field(&format!("trusted_peers[{i}].serial_number"), p.serial_number.as_ref())?;
+        validate_spiffe_id_field(&format!("trusted_peers[{i}].spiffe_id"), p.spiffe_id.as_ref())?;
 
-        if p.cert_digest.is_none() && p.organization.is_none() && p.serial_number.is_none() {
+        if p.cert_digest.is_none() && p.organization.is_none() && p.serial_number.is_none() && p.spiffe_id.is_none() {
             return Err(
                 format!("peer_identity_trust: trusted_peers[{i}] must specify at least one match field").into(),
             );
@@ -183,6 +201,7 @@ fn validate_peers(raw: Vec<TrustedPeerConfig>) -> Result<Vec<TrustedPeer>, Filte
             cert_digest: p.cert_digest,
             organization: p.organization,
             serial_number: p.serial_number,
+            spiffe_id: p.spiffe_id,
         });
     }
     Ok(peers)
@@ -211,6 +230,26 @@ fn validate_optional_field(name: &str, value: Option<&String>) -> Result<(), Fil
     Ok(())
 }
 
+/// Reject SPIFFE IDs that are malformed or carry a wildcard.
+fn validate_spiffe_id_field(name: &str, value: Option<&String>) -> Result<(), FilterError> {
+    let Some(v) = value else {
+        return Ok(());
+    };
+
+    validate_optional_field(name, Some(v))?;
+
+    if !v.starts_with(SPIFFE_SCHEME) || v.len() == SPIFFE_SCHEME.len() {
+        return Err(format!("peer_identity_trust: {name} must be a spiffe:// URI naming a peer").into());
+    }
+
+    // Matching is exact, so a wildcard would silently never match.
+    if v.contains('*') {
+        return Err(format!("peer_identity_trust: {name} must not contain a wildcard; names compare in full").into());
+    }
+
+    Ok(())
+}
+
 /// Check whether the peer identity matches any trusted peer entry.
 fn is_trusted(identity: &TlsPeerIdentity, peers: &[TrustedPeer]) -> bool {
     peers.iter().any(|peer| matches_peer(identity, peer))
@@ -221,6 +260,11 @@ fn is_trusted(identity: &TlsPeerIdentity, peers: &[TrustedPeer]) -> bool {
 fn matches_peer(identity: &TlsPeerIdentity, peer: &TrustedPeer) -> bool {
     if let Some(digest) = &peer.cert_digest
         && identity.hex_digest() != *digest
+    {
+        return false;
+    }
+    if let Some(id) = &peer.spiffe_id
+        && identity.spiffe_id() != Some(id.as_str())
     {
         return false;
     }
@@ -481,6 +525,7 @@ mod tests {
             cert_digest: vec![1],
             organization: None,
             serial_number: None,
+            uri_sans: Vec::new(),
         }));
 
         let action = f.on_request(&mut ctx).await.unwrap();
@@ -488,6 +533,72 @@ mod tests {
             matches!(action, FilterAction::Reject(r) if r.status == 403),
             "identity missing org should reject when org is required"
         );
+    }
+
+
+    // ---- SPIFFE ID matching ----
+
+    const POOL_A: &str = "spiffe://grid.internal/site/pool-a";
+
+    #[tokio::test]
+    async fn spiffe_id_exact_match_accepted() {
+        assert!(spiffe_verdict(POOL_A, &[POOL_A]).await, "the named peer is admitted");
+    }
+
+    #[tokio::test]
+    async fn spiffe_id_of_another_site_rejected() {
+        assert!(
+            !spiffe_verdict(POOL_A, &["spiffe://grid.internal/site/pool-b"]).await,
+            "a validly issued certificate naming another site is refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn spiffe_id_prefix_does_not_match() {
+        assert!(
+            !spiffe_verdict(POOL_A, &["spiffe://grid.internal/site/pool-a-evil"]).await,
+            "an authorized name is a prefix of longer ones; matching is exact"
+        );
+    }
+
+    #[tokio::test]
+    async fn spiffe_id_from_another_trust_domain_rejected() {
+        assert!(
+            !spiffe_verdict(POOL_A, &["spiffe://attacker.example/site/pool-a"]).await,
+            "the trust domain is part of the name"
+        );
+    }
+
+    #[tokio::test]
+    async fn certificate_with_two_uri_sans_names_nobody() {
+        assert!(
+            !spiffe_verdict(POOL_A, &[POOL_A, "spiffe://grid.internal/site/pool-b"]).await,
+            "a certificate holding two names must not authenticate as either"
+        );
+    }
+
+    #[tokio::test]
+    async fn certificate_without_a_uri_san_rejected() {
+        assert!(
+            !spiffe_verdict(POOL_A, &[]).await,
+            "membership in the grid is not a name"
+        );
+    }
+
+    #[test]
+    fn spiffe_id_wildcard_rejected() {
+        let err = parse("trusted_peers:\n  - spiffe_id: 'spiffe://grid.internal/site/*'")
+            .err()
+            .expect("should fail");
+        assert!(err.to_string().contains("wildcard"), "{err}");
+    }
+
+    #[test]
+    fn spiffe_id_wrong_scheme_rejected() {
+        let err = parse("trusted_peers:\n  - spiffe_id: 'https://grid.internal/site/pool-a'")
+            .err()
+            .expect("should fail");
+        assert!(err.to_string().contains("spiffe:// URI"), "{err}");
     }
 
     // ---- Test Utilities ----
@@ -514,6 +625,28 @@ mod tests {
             cert_digest: digest,
             organization: Some(org.to_owned()),
             serial_number: Some(serial.to_owned()),
+            uri_sans: Vec::new(),
         })
+    }
+
+    fn make_spiffe_identity(uri_sans: &[&str]) -> std::sync::Arc<TlsPeerIdentity> {
+        std::sync::Arc::new(TlsPeerIdentity {
+            cert_digest: vec![0x01; 32],
+            organization: Some("grid".to_owned()),
+            serial_number: Some("1".to_owned()),
+            uri_sans: uri_sans.iter().map(|s| (*s).to_owned()).collect(),
+        })
+    }
+
+    fn make_spiffe_filter(id: &str) -> Box<dyn HttpFilter> {
+        parse(&format!("trusted_peers:\n  - spiffe_id: '{id}'")).unwrap()
+    }
+
+    async fn spiffe_verdict(configured: &str, presented: &[&str]) -> bool {
+        let f = make_spiffe_filter(configured);
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.peer_identity = Some(make_spiffe_identity(presented));
+        matches!(f.on_request(&mut ctx).await.unwrap(), FilterAction::Continue)
     }
 }

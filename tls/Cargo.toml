@@ -27,6 +27,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt"], optional = true }
 tracing = { workspace = true }
+x509-parser = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]

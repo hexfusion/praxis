@@ -13,9 +13,13 @@
 use std::sync::Arc;
 
 use rustls::{
-    RootCertStore,
-    pki_types::{CertificateDer, CertificateRevocationListDer, pem::PemObject as _},
-    server::{WebPkiClientVerifier, danger::ClientCertVerifier},
+    DistinguishedName, RootCertStore, SignatureScheme,
+    client::danger::HandshakeSignatureValid,
+    pki_types::{CertificateDer, CertificateRevocationListDer, UnixTime, pem::PemObject as _},
+    server::{
+        WebPkiClientVerifier,
+        danger::{ClientCertVerified, ClientCertVerifier},
+    },
 };
 
 use crate::{ClientCertMode, TlsError};
@@ -76,7 +80,110 @@ pub(crate) fn build_client_verifier(
         ClientCertMode::Require => builder
             .build()
             .map_err(|e| verifier_err(format!("failed to build verifier: {e}"))),
+        ClientCertMode::RequireNamed => builder
+            .build()
+            .map(|inner| -> Arc<dyn ClientCertVerifier> { Arc::new(NamedPeerVerifier { inner }) })
+            .map_err(|e| verifier_err(format!("failed to build verifier: {e}"))),
         ClientCertMode::None => Err(TlsError::ClientVerifierNotRequired),
+    }
+}
+
+
+// -----------------------------------------------------------------------------
+// NamedPeerVerifier
+// -----------------------------------------------------------------------------
+
+/// Requires the client certificate to name its bearer.
+///
+/// Chain validation is delegated first, so the name is only read from a
+/// certificate that already verified against the configured authority.
+/// A certificate must carry exactly one URI SAN: one holding several
+/// would otherwise authenticate as any of them.
+#[derive(Debug)]
+struct NamedPeerVerifier {
+    /// Verifier that validates the chain before the name is read.
+    inner: Arc<dyn ClientCertVerifier>,
+}
+
+/// Return the single URI SAN in a DER-encoded certificate.
+fn single_uri_san(cert: &CertificateDer<'_>) -> Option<String> {
+    use x509_parser::{
+        extensions::GeneralName,
+        prelude::{FromDer as _, X509Certificate},
+    };
+
+    let (_, parsed) = X509Certificate::from_der(cert.as_ref()).ok()?;
+    let san = parsed.subject_alternative_name().ok().flatten()?;
+
+    let mut uris = san.value.general_names.iter().filter_map(|name| match name {
+        GeneralName::URI(uri) => Some((*uri).to_owned()),
+        GeneralName::OtherName(..)
+        | GeneralName::RFC822Name(_)
+        | GeneralName::DNSName(_)
+        | GeneralName::X400Address(_)
+        | GeneralName::DirectoryName(_)
+        | GeneralName::EDIPartyName(_)
+        | GeneralName::IPAddress(_)
+        | GeneralName::RegisteredID(_) => None,
+    });
+
+    // Exactly one, so a certificate holding several names names nobody.
+    let only = uris.next()?;
+    if uris.next().is_some() {
+        return None;
+    }
+    Some(only)
+}
+
+impl ClientCertVerifier for NamedPeerVerifier {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        self.inner.root_hint_subjects()
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        let verified = self.inner.verify_client_cert(end_entity, intermediates, now)?;
+
+        match single_uri_san(end_entity) {
+            Some(id) if id.starts_with("spiffe://") && id.len() > "spiffe://".len() => Ok(verified),
+            _ => Err(rustls::Error::General(
+                "client certificate must carry exactly one spiffe:// URI SAN".to_owned(),
+            )),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        self.inner.client_auth_mandatory()
+    }
+
+    fn offer_client_auth(&self) -> bool {
+        self.inner.offer_client_auth()
     }
 }
 
@@ -336,6 +443,78 @@ mod tests {
         assert!(
             matches!(&err, TlsError::FileLoadError { detail, .. } if detail.contains("failed to add CA cert")),
             "error should mention the failing add, got: {err}"
+        );
+    }
+
+    // ---- NamedPeerVerifier ----
+
+    /// Build a leaf signed by a throwaway CA, carrying the given URI SANs.
+    fn leaf_with_uri_sans(uris: &[&str]) -> Vec<u8> {
+        use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair, SanType};
+
+        let ca_key = KeyPair::generate().expect("CA key");
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
+        ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.distinguished_name.push(DnType::CommonName, "Named Test CA");
+        let issuer = Issuer::new(ca_params, &ca_key);
+
+        let leaf_key = KeyPair::generate().expect("leaf key");
+        let mut leaf_params = CertificateParams::new(Vec::<String>::new()).expect("leaf params");
+        leaf_params.distinguished_name.push(DnType::CommonName, "peer");
+        for uri in uris {
+            leaf_params
+                .subject_alt_names
+                .push(SanType::URI((*uri).try_into().expect("URI SAN")));
+        }
+        leaf_params
+            .signed_by(&leaf_key, &issuer)
+            .expect("leaf sign")
+            .der()
+            .to_vec()
+    }
+
+    #[test]
+    fn single_uri_san_returns_the_only_name() {
+        let der = leaf_with_uri_sans(&["spiffe://grid.internal/site/pool-a"]);
+        let cert = CertificateDer::from(der);
+        assert_eq!(
+            single_uri_san(&cert).as_deref(),
+            Some("spiffe://grid.internal/site/pool-a")
+        );
+    }
+
+    #[test]
+    fn single_uri_san_refuses_two_names() {
+        let der = leaf_with_uri_sans(&[
+            "spiffe://grid.internal/site/pool-a",
+            "spiffe://grid.internal/site/pool-b",
+        ]);
+        let cert = CertificateDer::from(der);
+        assert_eq!(
+            single_uri_san(&cert),
+            None,
+            "a certificate holding two names must name nobody"
+        );
+    }
+
+    #[test]
+    fn single_uri_san_is_none_without_a_uri_san() {
+        let der = leaf_with_uri_sans(&[]);
+        let cert = CertificateDer::from(der);
+        assert_eq!(single_uri_san(&cert), None);
+    }
+
+    #[test]
+    fn require_named_mode_mandates_client_auth() {
+        ensure_crypto_provider();
+        let ca = gen_ca_file();
+        let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
+
+        let verifier = build_client_verifier(ca_path, ClientCertMode::RequireNamed, &[])
+            .expect("require-named mode with valid CA should succeed");
+        assert!(
+            verifier.client_auth_mandatory(),
+            "require-named mode should mandate client auth"
         );
     }
 }

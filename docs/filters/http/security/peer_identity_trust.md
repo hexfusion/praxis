@@ -11,7 +11,9 @@ Requests without a verified peer identity are rejected with 403. Requests with a
 
 Each trusted peer entry specifies one or more match fields. All configured fields on an entry must match the peer identity for that entry to accept the request.
 
-`cert_digest` (the SHA-256 hex digest of the peer certificate) is the strongest static match field. `organization` and `serial_number` are weaker and are primarily useful for bootstrap or controlled test configurations where cert digests are not known ahead of time. SAN/SPIFFE identity matching is planned for a follow-up.
+`spiffe_id` names the peer and is the field to prefer: one certificate authority signs every peer, so `organization` is identical across them, while `cert_digest` and `serial_number` change on every reissue and so are pinning rather than identity. `organization` and `serial_number` remain useful for bootstrap and controlled test configurations.
+
+A `spiffe_id` is compared in full, including the trust domain, and only against a certificate presenting exactly one URI SAN. There is no prefix or wildcard form: an authorized name is a prefix of longer ones.
 
 ## Configuration
 
@@ -21,6 +23,7 @@ Each trusted peer entry specifies one or more match fields. All configured field
 | `trusted_peers[].cert_digest` | string | no | Lowercase hex-encoded SHA-256 certificate digest. |
 | `trusted_peers[].organization` | string | no | X.509 subject organization (`O=` field). Weaker than certificate digest — useful for bootstrap and controlled test configurations where cert digests are not known ahead of time. |
 | `trusted_peers[].serial_number` | string | no | Certificate serial number. |
+| `trusted_peers[].spiffe_id` | string | no | SPIFFE ID carried in the certificate's URI SAN. The strongest match field: it names the peer, and unlike `cert_digest` it survives reissue. |
 
 ## Example
 
