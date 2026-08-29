@@ -287,6 +287,9 @@ impl ListenerTls {
 ///
 /// let mode: ClientCertMode = serde_yaml::from_str("none").unwrap();
 /// assert!(matches!(mode, ClientCertMode::None));
+///
+/// let mode: ClientCertMode = serde_yaml::from_str("require_named").unwrap();
+/// assert!(matches!(mode, ClientCertMode::RequireNamed));
 /// ```
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
