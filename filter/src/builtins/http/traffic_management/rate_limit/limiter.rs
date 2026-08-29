@@ -134,13 +134,19 @@ impl RateLimitFilter {
     ///
     /// [`AuthenticatedIdentity`]: crate::AuthenticatedIdentity
     pub(super) fn principal(&self, ctx: &HttpFilterContext<'_>) -> Option<String> {
-        if !matches!(self.state, RateLimitState::PerIdentity(_)) {
-            return None;
-        }
-        let identity = ctx.extensions.get::<AuthenticatedIdentity>()?;
-        match self.key_claim.as_ref() {
-            Some(claim) => identity.custom_claims().get(claim).cloned(),
-            None => Some(identity.subject_id().to_owned()),
+        match self.state {
+            RateLimitState::PerIdentity(_) => {
+                let identity = ctx.extensions.get::<AuthenticatedIdentity>()?;
+                match self.key_claim.as_ref() {
+                    Some(claim) => identity.custom_claims().get(claim).cloned(),
+                    None => Some(identity.subject_id().to_owned()),
+                }
+            },
+            // The name the handshake proved, not one the caller sent. A
+            // certificate presenting several URI SANs names nobody, so it
+            // has no bucket and is refused.
+            RateLimitState::PerPeer(_) => ctx.peer_identity.as_ref()?.spiffe_id().map(str::to_owned),
+            RateLimitState::Global(_) | RateLimitState::PerIp(_) => None,
         }
     }
 
@@ -220,6 +226,12 @@ impl RateLimitFilter {
                 }
                 self.acquire_keyed(state, principal.map(str::to_owned), now, limit)
             },
+            RateLimitState::PerPeer(state) => {
+                if principal.is_none() {
+                    tracing::info!("rate_limit: rejecting request with no named peer");
+                }
+                self.acquire_keyed(state, principal.map(str::to_owned), now, limit)
+            },
         }
     }
 
@@ -296,7 +308,7 @@ impl RateLimitFilter {
                     .get(&ip)
                     .map_or(limit.burst, |b| b.current_tokens(limit.rate, limit.burst, now))
             },
-            RateLimitState::PerIdentity(state) => {
+            RateLimitState::PerIdentity(state) | RateLimitState::PerPeer(state) => {
                 let Some(principal) = principal else {
                     return 0.0;
                 };

@@ -22,6 +22,9 @@ use serde::Deserialize;
 ///
 /// let mode: RateLimitMode = serde_yaml::from_str("per_identity").unwrap();
 /// assert!(matches!(mode, RateLimitMode::PerIdentity));
+///
+/// let mode: RateLimitMode = serde_yaml::from_str("per_peer").unwrap();
+/// assert!(matches!(mode, RateLimitMode::PerPeer));
 /// ```
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,6 +43,18 @@ pub enum RateLimitMode {
     ///
     /// [`AuthenticatedIdentity`]: crate::AuthenticatedIdentity
     PerIdentity,
+
+    /// Independent bucket per authenticated peer site.
+    ///
+    /// Keys on the SPIFFE ID in the peer's client certificate, so the
+    /// limit follows an identity the handshake proved rather than
+    /// anything the caller sent. This is the wholesale case: a provider
+    /// bounding how much a peer consumes, without modelling that peer's
+    /// own tenants.
+    ///
+    /// The certificate carries no rate, so `rate` and `burst` are the
+    /// configured values. The claim fields belong to `per_identity`.
+    PerPeer,
 }
 
 // -----------------------------------------------------------------------------

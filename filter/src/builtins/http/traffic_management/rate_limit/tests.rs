@@ -632,6 +632,7 @@ fn make_filter(mode: &str, rate: f64, burst: u32) -> RateLimitFilter {
         "global" => RateLimitState::Global(TokenBucket::new(burst_f)),
         "per_ip" => RateLimitState::PerIp(KeyedState::new()),
         "per_identity" => RateLimitState::PerIdentity(KeyedState::new()),
+        "per_peer" => RateLimitState::PerPeer(KeyedState::new()),
         _ => panic!("invalid mode in test utility"),
     };
     RateLimitFilter {
@@ -807,5 +808,131 @@ async fn per_identity_can_group_principals_by_claim() {
     assert!(
         matches!(&filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
         "a different subject in the same site should draw from the same bucket"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// per_peer mode
+// -----------------------------------------------------------------------------
+
+/// Build a context carrying a verified peer certificate identity.
+fn ctx_with_peer<'a>(req: &'a crate::context::Request, uri_sans: &[&str]) -> crate::filter::HttpFilterContext<'a> {
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.peer_identity = Some(std::sync::Arc::new(praxis_tls::TlsPeerIdentity {
+        cert_digest: vec![0x01; 32],
+        organization: Some("grid".to_owned()),
+        serial_number: Some("1".to_owned()),
+        uri_sans: uri_sans.iter().map(|s| (*s).to_owned()).collect(),
+    }));
+    ctx
+}
+
+#[test]
+fn from_config_parses_per_peer() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: per_peer\nrate: 2\nburst: 4").unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).unwrap();
+    assert_eq!(filter.name(), "rate_limit", "filter name should be rate_limit");
+}
+
+#[test]
+fn from_config_rejects_claim_fields_under_per_peer() {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("mode: per_peer\nkey_claim: grid_site\nrate: 2\nburst: 4").unwrap();
+    let err = RateLimitFilter::from_config(&yaml)
+        .err()
+        .expect("per_peer with a key_claim should error");
+    assert!(
+        err.to_string().contains("require mode per_identity"),
+        "a certificate carries no claims: {err}"
+    );
+}
+
+#[tokio::test]
+async fn per_peer_isolates_sites() {
+    let filter = make_filter("per_peer", 10.0, 1);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut ctx = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-a"]);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "site-a's first request should pass"
+    );
+
+    let mut ctx = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-a"]);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
+        "site-a's second should exhaust its own bucket"
+    );
+
+    let mut ctx = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-d"]);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "site-d has its own bucket and is unaffected by site-a"
+    );
+}
+
+#[tokio::test]
+async fn per_peer_rejects_a_connection_with_no_peer_certificate() {
+    let filter = make_filter("per_peer", 10.0, 100);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
+        "an unnamed caller has no bucket and must not be handed a fresh one"
+    );
+}
+
+#[tokio::test]
+async fn per_peer_rejects_a_certificate_naming_two_sites() {
+    let filter = make_filter("per_peer", 10.0, 100);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = ctx_with_peer(
+        &req,
+        &[
+            "spiffe://grid.internal/site/site-a",
+            "spiffe://grid.internal/site/site-d",
+        ],
+    );
+
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
+        "two names name nobody, so there is no bucket to charge"
+    );
+}
+
+#[tokio::test]
+async fn per_peer_ignores_a_bearer_identity() {
+    // The bucket follows the certificate. A caller cannot move to another
+    // site's bucket by presenting a token that claims to be that site.
+    let filter = make_filter("per_peer", 10.0, 1);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut ctx = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-a"]);
+    let identity = crate::AuthenticatedIdentity::new(
+        "spiffe://grid.internal/site/site-d".to_owned(),
+        Vec::new(),
+        Vec::new(),
+        std::iter::empty::<(String, String)>(),
+    )
+    .expect("non-empty subject yields an identity");
+    ctx.extensions.insert(identity);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "first request on site-a's bucket"
+    );
+
+    let mut ctx = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-a"]);
+    let identity = crate::AuthenticatedIdentity::new(
+        "spiffe://grid.internal/site/site-d".to_owned(),
+        Vec::new(),
+        Vec::new(),
+        std::iter::empty::<(String, String)>(),
+    )
+    .expect("non-empty subject yields an identity");
+    ctx.extensions.insert(identity);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
+        "the token claiming site-d must not open a second bucket"
     );
 }

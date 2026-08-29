@@ -91,6 +91,9 @@ enum RateLimitState {
 
     /// Independent bucket per authenticated principal.
     PerIdentity(KeyedState<String>),
+
+    /// Independent bucket per authenticated peer site.
+    PerPeer(KeyedState<String>),
 }
 
 // -----------------------------------------------------------------------------
@@ -347,6 +350,7 @@ impl RateLimitFilter {
             RateLimitMode::Global => RateLimitState::Global(TokenBucket::new(burst)),
             RateLimitMode::PerIp => RateLimitState::PerIp(KeyedState::new()),
             RateLimitMode::PerIdentity => RateLimitState::PerIdentity(KeyedState::new()),
+            RateLimitMode::PerPeer => RateLimitState::PerPeer(KeyedState::new()),
         };
 
         Ok(Box::new(Self {

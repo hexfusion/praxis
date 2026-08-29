@@ -17,7 +17,7 @@ State is all managed locally.
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `mode` | `global` \| `per_ip` \| `per_identity` | yes | How to partition buckets: one shared, per source IP, or per authenticated principal. |
+| `mode` | `global` \| `per_ip` \| `per_identity` \| `per_peer` | yes | How to partition buckets: one shared, per source IP, or per authenticated principal. |
 | `rate` | number | yes | Tokens replenished per second. |
 | `burst` | integer | yes | Maximum bucket capacity. |
 | `key_claim` | string | no | Custom claim naming the bucket, instead of the subject id. Lets several principals share one bucket (a tenant, a site) when the identity carries a coarser grouping than its subject. `per_identity` only. |
