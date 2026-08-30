@@ -78,6 +78,16 @@ const HEADER_RATELIMIT_REMAINING: &str = "X-RateLimit-Remaining";
 /// Rate limit header: Unix timestamp when the bucket fully refills.
 const HEADER_RATELIMIT_RESET: &str = "X-RateLimit-Reset";
 
+/// Metadata key: the token-mode principal, stashed at request time so the
+/// response-body debit can key on the identity after it has left the context.
+const META_TOKEN_PRINCIPAL: &str = "rate_limit.token.principal";
+
+/// Metadata key: the token-mode refill rate resolved at request time.
+const META_TOKEN_RATE: &str = "rate_limit.token.rate";
+
+/// Metadata key: the token-mode budget (burst) resolved at request time.
+const META_TOKEN_BURST: &str = "rate_limit.token.burst";
+
 // -----------------------------------------------------------------------------
 // RateLimitState
 // -----------------------------------------------------------------------------
@@ -400,9 +410,21 @@ impl HttpFilter for RateLimitFilter {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "admission plus the token-mode stash read best inline")]
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let principal = self.principal(ctx);
         let limit = self.resolve_limit(ctx);
+        // Token metering debits in on_response_body, by when the identity that
+        // resolved this principal and its claim-based limit is gone: identities
+        // live in request-scoped extensions, which do not survive to the
+        // response phase. Stash them in filter_metadata, which does.
+        if self.meter == RateLimitMeter::Tokens {
+            if let Some(name) = principal.as_deref() {
+                ctx.set_metadata(META_TOKEN_PRINCIPAL, name.to_owned());
+            }
+            ctx.set_metadata(META_TOKEN_RATE, limit.rate.to_string());
+            ctx.set_metadata(META_TOKEN_BURST, limit.burst.to_string());
+        }
         // `requests` debits one unit at admission. `tokens` cannot know
         // the cost until the response has been read, so it only checks
         // that budget remains and defers the debit to `on_response_body`.
@@ -483,10 +505,23 @@ impl HttpFilter for RateLimitFilter {
                 .and_then(|v| v.parse::<f64>().ok())
                 .filter(|amount| *amount > 0.0);
             if let Some(amount) = cost {
-                let principal = self.principal(ctx);
-                let limit = self.resolve_limit(ctx);
+                // Use the principal and limit stashed at request time: the
+                // identity that resolved them (e.g. an authenticated user) is
+                // gone by the response phase. per_peer stashes the same value it
+                // would re-derive, so this path is uniform across modes.
+                let principal = ctx.get_metadata(META_TOKEN_PRINCIPAL).map(str::to_owned);
+                let limit = Limit {
+                    rate: ctx
+                        .get_metadata(META_TOKEN_RATE)
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(self.rate),
+                    burst: ctx
+                        .get_metadata(META_TOKEN_BURST)
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(self.burst),
+                };
                 self.debit_for(ctx.client_addr, principal.as_deref(), limit, amount);
-                tracing::debug!(amount, "rate_limit: debited token usage");
+                tracing::debug!(amount, principal = ?principal, "rate_limit: debited token usage");
             }
         }
 
