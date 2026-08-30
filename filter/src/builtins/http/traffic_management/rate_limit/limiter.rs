@@ -146,6 +146,24 @@ impl RateLimitFilter {
             // certificate presenting several URI SANs names nobody, so it
             // has no bucket and is refused.
             RateLimitState::PerPeer(_) => ctx.peer_identity.as_ref()?.spiffe_id().map(str::to_owned),
+            // Whichever grid identity the chain resolved. The peer identity
+            // the handshake proved takes precedence; then the authenticated
+            // user subject. Both are names a trusted filter published, not
+            // anything the caller sent. Namespaced so a peer SPIFFE and a
+            // user subject can never share a bucket. No identity => None =>
+            // refused, which makes the mode default-deny.
+            RateLimitState::PerPrincipal(_) => {
+                if let Some(spiffe) = ctx.peer_identity.as_ref().and_then(|p| p.spiffe_id()) {
+                    Some(format!("peer:{spiffe}"))
+                } else {
+                    let identity = ctx.extensions.get::<AuthenticatedIdentity>()?;
+                    let subject = match self.key_claim.as_ref() {
+                        Some(claim) => identity.custom_claims().get(claim).cloned(),
+                        None => Some(identity.subject_id().to_owned()),
+                    };
+                    subject.map(|s| format!("user:{s}"))
+                }
+            },
             RateLimitState::Global(_) | RateLimitState::PerIp(_) => None,
         }
     }
@@ -170,9 +188,12 @@ impl RateLimitFilter {
     /// so a provider that publishes nothing keeps the static behaviour
     /// rather than no limit at all.
     pub(super) fn resolve_limit(&self, ctx: &HttpFilterContext<'_>) -> Limit {
-        if !matches!(self.state, RateLimitState::PerIdentity(_)) {
+        if !matches!(self.state, RateLimitState::PerIdentity(_) | RateLimitState::PerPrincipal(_)) {
             return self.static_limit();
         }
+        // A user principal can carry claim-signed limits; a peer principal
+        // carries none, so `per_principal` falls back to the configured
+        // limit here exactly as a certificate would.
         let Some(identity) = ctx.extensions.get::<AuthenticatedIdentity>() else {
             return self.static_limit();
         };
@@ -229,6 +250,12 @@ impl RateLimitFilter {
             RateLimitState::PerPeer(state) => {
                 if principal.is_none() {
                     tracing::info!("rate_limit: rejecting request with no named peer");
+                }
+                self.acquire_keyed(state, principal.map(str::to_owned), now, limit)
+            },
+            RateLimitState::PerPrincipal(state) => {
+                if principal.is_none() {
+                    tracing::info!("rate_limit: rejecting request with no resolved principal");
                 }
                 self.acquire_keyed(state, principal.map(str::to_owned), now, limit)
             },
@@ -308,7 +335,9 @@ impl RateLimitFilter {
             RateLimitState::PerIp(state) => {
                 self.debit_keyed(state, client_addr.map(normalize_mapped_ipv4), limit, amount);
             },
-            RateLimitState::PerIdentity(state) | RateLimitState::PerPeer(state) => {
+            RateLimitState::PerIdentity(state)
+            | RateLimitState::PerPeer(state)
+            | RateLimitState::PerPrincipal(state) => {
                 self.debit_keyed(state, principal.map(str::to_owned), limit, amount);
             },
         }
@@ -362,7 +391,9 @@ impl RateLimitFilter {
                     .get(&ip)
                     .map_or(limit.burst, |b| b.current_tokens(limit.rate, limit.burst, now))
             },
-            RateLimitState::PerIdentity(state) | RateLimitState::PerPeer(state) => {
+            RateLimitState::PerIdentity(state)
+            | RateLimitState::PerPeer(state)
+            | RateLimitState::PerPrincipal(state) => {
                 let Some(principal) = principal else {
                     return 0.0;
                 };

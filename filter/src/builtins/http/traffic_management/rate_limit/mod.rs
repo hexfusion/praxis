@@ -105,6 +105,12 @@ enum RateLimitState {
 
     /// Independent bucket per authenticated peer site.
     PerPeer(KeyedState<String>),
+
+    /// Independent bucket per resolved grid principal, of either kind
+    /// (peer SPIFFE id or authenticated user subject). Keys are
+    /// namespaced (`peer:` / `user:`) so the two identity spaces cannot
+    /// collide in one map.
+    PerPrincipal(KeyedState<String>),
 }
 
 // -----------------------------------------------------------------------------
@@ -307,15 +313,18 @@ impl RateLimitFilter {
     ///
     /// # Errors
     ///
-    /// Returns an error if any claim field is set outside
-    /// `per_identity`, so a misplaced key fails at startup rather than
-    /// silently limiting the wrong thing.
+    /// Returns an error if any claim field is set outside the modes that
+    /// resolve a claim-bearing identity (`per_identity`, `per_principal`),
+    /// so a misplaced key fails at startup rather than silently limiting
+    /// the wrong thing.
     fn validate_claims(cfg: &RateLimitConfig) -> Result<(), FilterError> {
-        if matches!(cfg.mode, RateLimitMode::PerIdentity) {
+        if matches!(cfg.mode, RateLimitMode::PerIdentity | RateLimitMode::PerPrincipal) {
             return Ok(());
         }
         if cfg.key_claim.is_some() || cfg.rate_claim.is_some() || cfg.burst_claim.is_some() {
-            return Err("rate_limit: key_claim, rate_claim and burst_claim require mode per_identity".into());
+            return Err(
+                "rate_limit: key_claim, rate_claim and burst_claim require mode per_identity or per_principal".into(),
+            );
         }
         Ok(())
     }
@@ -372,6 +381,7 @@ impl RateLimitFilter {
             RateLimitMode::PerIp => RateLimitState::PerIp(KeyedState::new()),
             RateLimitMode::PerIdentity => RateLimitState::PerIdentity(KeyedState::new()),
             RateLimitMode::PerPeer => RateLimitState::PerPeer(KeyedState::new()),
+            RateLimitMode::PerPrincipal => RateLimitState::PerPrincipal(KeyedState::new()),
         };
 
         Ok(Box::new(Self {

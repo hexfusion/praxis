@@ -44,6 +44,25 @@ const SPIFFE_SCHEME: &str = "spiffe://";
 struct PeerIdentityTrustConfig {
     /// Trusted peer entries.
     trusted_peers: Vec<TrustedPeerConfig>,
+
+    /// Whether a peer identity must be present.
+    ///
+    /// `true` (default): a request with no verified peer identity is
+    /// rejected, the standalone mTLS-gateway posture.
+    ///
+    /// `false`: a request with no peer identity continues, letting a
+    /// later filter resolve a different credential (e.g. a bearer JWT).
+    /// A peer identity that *is* present but untrusted is still rejected.
+    /// Use this when one chain admits both peer sites and users and a
+    /// downstream default-deny gate (`rate_limit: per_principal`) refuses
+    /// anything that resolved no identity of either kind.
+    #[serde(default = "default_required")]
+    required: bool,
+}
+
+/// Default for [`PeerIdentityTrustConfig::required`]: fail closed.
+const fn default_required() -> bool {
+    true
 }
 
 /// A trusted peer entry. All configured fields must match.
@@ -110,6 +129,9 @@ struct TrustedPeerConfig {
 pub struct PeerIdentityTrustFilter {
     /// Validated trusted peer entries.
     trusted_peers: Vec<TrustedPeer>,
+
+    /// Reject when no peer identity is present (see the config field).
+    required: bool,
 }
 
 /// Validated trusted peer entry for runtime matching.
@@ -145,7 +167,10 @@ impl PeerIdentityTrustFilter {
         }
 
         let peers = validate_peers(cfg.trusted_peers)?;
-        Ok(Box::new(Self { trusted_peers: peers }))
+        Ok(Box::new(Self {
+            trusted_peers: peers,
+            required: cfg.required,
+        }))
     }
 }
 
@@ -157,8 +182,16 @@ impl HttpFilter for PeerIdentityTrustFilter {
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let Some(identity) = &ctx.peer_identity else {
-            tracing::warn!("peer identity trust: no peer identity; rejecting");
-            return Ok(FilterAction::Reject(Rejection::status(403)));
+            if self.required {
+                tracing::warn!("peer identity trust: no peer identity; rejecting");
+                return Ok(FilterAction::Reject(Rejection::status(403)));
+            }
+            // Optional: no certificate presented. Let a later filter resolve
+            // another credential; a downstream default-deny gate refuses a
+            // request that ends up with no identity of any kind. A present
+            // but untrusted certificate below is still rejected.
+            tracing::debug!("peer identity trust: no peer identity; optional, continuing");
+            return Ok(FilterAction::Continue);
         };
 
         if is_trusted(identity, &self.trusted_peers) {
@@ -420,6 +453,39 @@ mod tests {
         assert!(
             matches!(action, FilterAction::Reject(r) if r.status == 403),
             "missing peer identity should reject with 403"
+        );
+    }
+
+    #[tokio::test]
+    async fn optional_continues_when_no_peer_identity() {
+        // required: false lets a request with no certificate through, so a
+        // shared chain can fall to another credential (e.g. a bearer JWT)
+        // with a downstream default-deny gate as the real backstop.
+        let f = parse("required: false\ntrusted_peers:\n  - organization: test-org").unwrap();
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = f.on_request(&mut ctx).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "optional trust must not reject a request that presented no certificate"
+        );
+    }
+
+    #[tokio::test]
+    async fn optional_still_rejects_a_present_untrusted_peer() {
+        // required: false relaxes only the absent case. A certificate that IS
+        // presented but untrusted is still rejected: presenting a bad
+        // credential is an attack, not a fall-through to another method.
+        let f = parse("required: false\ntrusted_peers:\n  - organization: test-org").unwrap();
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.peer_identity = Some(make_identity(vec![1], "wrong-org", "1"));
+
+        let action = f.on_request(&mut ctx).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Reject(r) if r.status == 403),
+            "a present but untrusted certificate must still be rejected"
         );
     }
 

@@ -55,6 +55,25 @@ pub enum RateLimitMode {
     /// The certificate carries no rate, so `rate` and `burst` are the
     /// configured values. The claim fields belong to `per_identity`.
     PerPeer,
+
+    /// Independent bucket per resolved grid principal, of either kind.
+    ///
+    /// Keys on whichever identity the chain resolved: the peer SPIFFE ID
+    /// if [`peer_identity_trust`] named a peer, otherwise the
+    /// [`AuthenticatedIdentity`] subject a trusted auth filter published.
+    /// This is the unified case a single grid gateway wants: one limiter
+    /// that meters a peer site and a local user alike, keyed on the
+    /// identity actually on the wire, with no side-channel tag to say
+    /// which. A request that resolved neither has no key and is refused,
+    /// so the mode is default-deny.
+    ///
+    /// When the principal is a user, the claim fields (`rate_claim`,
+    /// `burst_claim`) apply exactly as under `per_identity`; a peer
+    /// carries no claims, so it uses the configured `rate` and `burst`.
+    ///
+    /// [`peer_identity_trust`]: crate::builtins
+    /// [`AuthenticatedIdentity`]: crate::AuthenticatedIdentity
+    PerPrincipal,
 }
 
 // -----------------------------------------------------------------------------

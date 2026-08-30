@@ -636,12 +636,13 @@ fn make_eviction_filter(rate: f64, burst: f64) -> RateLimitFilter {
 /// Build a [`RateLimitFilter`] directly (bypassing YAML parsing).
 fn make_filter(mode: &str, rate: f64, burst: u32) -> RateLimitFilter {
     let burst_f = f64::from(burst);
-    let keyed = mode == "per_identity";
+    let keyed = mode == "per_identity" || mode == "per_principal";
     let state = match mode {
         "global" => RateLimitState::Global(TokenBucket::new(burst_f)),
         "per_ip" => RateLimitState::PerIp(KeyedState::new()),
         "per_identity" => RateLimitState::PerIdentity(KeyedState::new()),
         "per_peer" => RateLimitState::PerPeer(KeyedState::new()),
+        "per_principal" => RateLimitState::PerPrincipal(KeyedState::new()),
         _ => panic!("invalid mode in test utility"),
     };
     RateLimitFilter {
@@ -979,6 +980,106 @@ async fn per_peer_isolates_sites() {
     assert!(
         matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
         "site-d has its own bucket and is unaffected by site-a"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// per_principal mode (one limiter, either identity kind)
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn per_principal_keys_on_the_peer_when_a_certificate_is_present() {
+    let filter = make_filter("per_principal", 10.0, 1);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut ctx = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-a"]);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "site-a's first request passes"
+    );
+    let mut ctx = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-a"]);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
+        "site-a exhausts its own per-principal bucket"
+    );
+    let mut ctx = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-b"]);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "site-b has its own bucket, isolated from site-a"
+    );
+}
+
+#[tokio::test]
+async fn per_principal_keys_on_the_user_when_no_certificate_is_present() {
+    let filter = make_filter("per_principal", 10.0, 1);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut ctx = ctx_with_identity(&req, "alice", &[]);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "alice's first request passes"
+    );
+    let mut ctx = ctx_with_identity(&req, "alice", &[]);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
+        "alice exhausts her own bucket"
+    );
+    let mut ctx = ctx_with_identity(&req, "bob", &[]);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "bob has his own bucket, isolated from alice"
+    );
+}
+
+#[tokio::test]
+async fn per_principal_rejects_a_caller_that_resolved_no_identity() {
+    // Default-deny: with neither a certificate nor a bearer identity there
+    // is no bucket to charge, so the request is refused. This is the
+    // property that makes one shared chain safe without a caller-type tag —
+    // an untagged or credential-less request cannot slip through unmetered.
+    let filter = make_filter("per_principal", 10.0, 100);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
+        "no identity of any kind must not be handed a fresh bucket"
+    );
+}
+
+#[tokio::test]
+async fn per_principal_prefers_the_peer_certificate_over_a_bearer_identity() {
+    // A caller presenting both a verified certificate and a bearer token is
+    // metered as the peer the handshake proved, never the token it sent, so
+    // it cannot move onto a user bucket to escape its wholesale budget.
+    let filter = make_filter("per_principal", 10.0, 1);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut ctx = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-a"]);
+    let identity = crate::AuthenticatedIdentity::new(
+        "alice".to_owned(),
+        Vec::new(),
+        Vec::new(),
+        std::iter::empty::<(String, String)>(),
+    )
+    .expect("non-empty subject yields an identity");
+    ctx.extensions.insert(identity);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "the combined caller's first request passes"
+    );
+
+    // alice's own bucket is untouched: the peer bucket, not alice's, was charged.
+    let mut ctx = ctx_with_identity(&req, "alice", &[]);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "alice's user bucket is fresh; the peer bucket held the charge"
+    );
+
+    // And a second peer request is refused: site-a's bucket is exhausted.
+    let mut ctx = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-a"]);
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
+        "the peer bucket, not alice's, was charged"
     );
 }
 
