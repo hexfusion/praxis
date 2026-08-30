@@ -409,6 +409,9 @@ private_doc_tests = "allow"
 # The pingora fork carries URI SAN extraction, which SslDigest upstream
 # does not have. Pinned to a rev so the build is reproducible.
 [patch.crates-io]
+# Build the policy engine from local /policy so the filter tracks its current
+# API (claims as JSON values) and the identity-jwt optional-resolver change.
+praxis-policy = { path = "../policy/crates/ppe" }
 quixotic-plecostomus-core = { git = "https://github.com/hexfusion/pingora", rev = "28acf2264c645cdac791c330d488d9023e25dfba" }
 quixotic-plecostomus-http = { git = "https://github.com/hexfusion/pingora", rev = "28acf2264c645cdac791c330d488d9023e25dfba" }
 quixotic-plecostomus-proxy = { git = "https://github.com/hexfusion/pingora", rev = "28acf2264c645cdac791c330d488d9023e25dfba" }

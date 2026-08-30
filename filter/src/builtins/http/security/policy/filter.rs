@@ -393,7 +393,18 @@ impl PolicyFilter {
                 subject.id.clone()?,
                 subject.roles.iter().cloned(),
                 subject.teams.iter().cloned(),
-                subject.claims.iter().map(|(name, value)| (name.clone(), value.clone())),
+                // PPE carries claim values as JSON. Flatten to the string
+                // downstream consumers expect: the inner text for a JSON
+                // string, the compact JSON otherwise, so a numeric budget
+                // claim like `grid_burst: 500` becomes "500" and parses back
+                // to a number in the rate limiter.
+                subject.claims.iter().map(|(name, value)| {
+                    let flattened = match value {
+                        serde_json::Value::String(text) => text.clone(),
+                        other => other.to_string(),
+                    };
+                    (name.clone(), flattened)
+                }),
             )
         })
     }
