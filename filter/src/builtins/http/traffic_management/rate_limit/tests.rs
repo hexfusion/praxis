@@ -9,7 +9,8 @@ use dashmap::DashMap;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 
 use super::{
-    EVICTION_INTERVAL_NANOS, HARD_CAP_PER_IP_ENTRIES, KeyedState, MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState,
+    EVICTION_INTERVAL_NANOS, HARD_CAP_PER_IP_ENTRIES, KeyedState, MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitMeter,
+    RateLimitState,
 };
 use crate::{FilterAction, builtins::http::traffic_management::token_bucket::TokenBucket, filter::HttpFilter as _};
 
@@ -311,6 +312,8 @@ fn per_ip_eviction_skips_when_below_threshold() {
         key_claim: None,
         rate_claim: None,
         burst_claim: None,
+        meter: RateLimitMeter::Requests,
+        cost_metadata_key: "token.total".to_owned(),
         rate,
         burst,
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
@@ -456,6 +459,8 @@ fn hard_cap_rejects_new_ips() {
         key_claim: None,
         rate_claim: None,
         burst_claim: None,
+        meter: RateLimitMeter::Requests,
+        cost_metadata_key: "token.total".to_owned(),
         rate,
         burst,
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
@@ -492,6 +497,8 @@ fn hard_cap_allows_known_ips() {
         key_claim: None,
         rate_claim: None,
         burst_claim: None,
+        meter: RateLimitMeter::Requests,
+        cost_metadata_key: "token.total".to_owned(),
         rate,
         burst,
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
@@ -615,6 +622,8 @@ fn make_eviction_filter(rate: f64, burst: f64) -> RateLimitFilter {
         key_claim: None,
         rate_claim: None,
         burst_claim: None,
+        meter: RateLimitMeter::Requests,
+        cost_metadata_key: "token.total".to_owned(),
         rate,
         burst,
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
@@ -640,6 +649,8 @@ fn make_filter(mode: &str, rate: f64, burst: u32) -> RateLimitFilter {
         key_claim: None,
         rate_claim: keyed.then(|| "grid_rate".to_owned()),
         burst_claim: keyed.then(|| "grid_burst".to_owned()),
+        meter: RateLimitMeter::Requests,
+        cost_metadata_key: "token.total".to_owned(),
         rate,
         burst: burst_f,
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
@@ -669,6 +680,106 @@ fn ctx_with_identity<'a>(
     .expect("non-empty subject yields an identity");
     ctx.extensions.insert(identity);
     ctx
+}
+
+// -----------------------------------------------------------------------------
+// token metering (meter: tokens)
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn token_meter_debits_response_usage_until_the_budget_is_exhausted() {
+    // A 1000-token budget with negligible refill during the test. Each
+    // response spends 400 tokens: 1000 -> 600 -> 200 -> -200. The first
+    // three requests are admitted (budget positive on arrival); the
+    // fourth is refused once the running total has gone negative.
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("mode: per_identity\nrate: 0.0001\nburst: 1000\nmeter: tokens").unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).unwrap();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+
+    let mut admitted = Vec::new();
+    for _ in 0..4 {
+        let mut ctx = ctx_with_identity(&req, "spiffe://grid.internal/site/site-a", &[]);
+        let ok = matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Continue);
+        admitted.push(ok);
+        if ok {
+            ctx.set_metadata("token.total", "400");
+            assert!(matches!(
+                filter.on_response_body(&mut ctx, &mut None, true).unwrap(),
+                FilterAction::Continue
+            ));
+        }
+    }
+
+    assert_eq!(
+        admitted,
+        vec![true, true, true, false],
+        "a 1000-token budget admits three 400-token spends, then refuses"
+    );
+}
+
+#[tokio::test]
+async fn token_meter_isolates_one_peer_from_another() {
+    // Per-peer token budgets: one site draining its budget must not touch
+    // another's. site-a spends past its 500-token budget; site-b, which
+    // has spent nothing, is still admitted.
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("mode: per_peer\nrate: 0.0001\nburst: 500\nmeter: tokens").unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).unwrap();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+
+    for _ in 0..2 {
+        let mut ctx = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-a"]);
+        assert!(matches!(
+            filter.on_request(&mut ctx).await.unwrap(),
+            FilterAction::Continue
+        ));
+        ctx.set_metadata("token.total", "400");
+        assert!(matches!(
+            filter.on_response_body(&mut ctx, &mut None, true).unwrap(),
+            FilterAction::Continue
+        ));
+    }
+
+    let mut site_a = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-a"]);
+    assert!(
+        matches!(filter.on_request(&mut site_a).await.unwrap(), FilterAction::Reject(_)),
+        "site-a is refused once its own budget is spent"
+    );
+
+    let mut site_b = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-b"]);
+    assert!(
+        matches!(filter.on_request(&mut site_b).await.unwrap(), FilterAction::Continue),
+        "site-b is unaffected by site-a's spending"
+    );
+}
+
+#[tokio::test]
+async fn token_meter_treats_a_missing_usage_report_as_no_cost() {
+    // If no filter published `token.total`, the request cost nothing to
+    // the budget rather than a wrong amount, so a second request is still
+    // admitted at full budget.
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("mode: per_peer\nrate: 0.0001\nburst: 10\nmeter: tokens").unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).unwrap();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+
+    let mut first = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-a"]);
+    assert!(matches!(
+        filter.on_request(&mut first).await.unwrap(),
+        FilterAction::Continue
+    ));
+    // No set_metadata: the response body finishes with no usage published.
+    assert!(matches!(
+        filter.on_response_body(&mut first, &mut None, true).unwrap(),
+        FilterAction::Continue
+    ));
+
+    let mut second = ctx_with_peer(&req, &["spiffe://grid.internal/site/site-a"]);
+    assert!(
+        matches!(filter.on_request(&mut second).await.unwrap(), FilterAction::Continue),
+        "a missing usage report debits nothing, so the budget is untouched"
+    );
 }
 
 #[test]

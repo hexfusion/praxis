@@ -291,6 +291,60 @@ impl RateLimitFilter {
         }
     }
 
+    /// Debit a metered cost from the caller's bucket after the response.
+    ///
+    /// The mirror of [`try_acquire_for`] for `meter: tokens`: rather than
+    /// consuming one unit at admission, it subtracts `amount` (the tokens
+    /// the response used) once the cost is known. A request with no key is
+    /// not debited, matching how [`acquire_keyed`] refuses one admission.
+    ///
+    /// [`try_acquire_for`]: Self::try_acquire_for
+    /// [`acquire_keyed`]: Self::acquire_keyed
+    pub(super) fn debit_for(&self, client_addr: Option<IpAddr>, principal: Option<&str>, limit: Limit, amount: f64) {
+        match &self.state {
+            RateLimitState::Global(bucket) => {
+                bucket.debit(limit.rate, limit.burst, self.now_nanos(), amount);
+            },
+            RateLimitState::PerIp(state) => {
+                self.debit_keyed(state, client_addr.map(normalize_mapped_ipv4), limit, amount);
+            },
+            RateLimitState::PerIdentity(state) | RateLimitState::PerPeer(state) => {
+                self.debit_keyed(state, principal.map(str::to_owned), limit, amount);
+            },
+        }
+    }
+
+    /// Keyed debit, get-or-creating the bucket like [`acquire_keyed`].
+    ///
+    /// [`acquire_keyed`]: Self::acquire_keyed
+    fn debit_keyed<K: Eq + Hash>(&self, state: &KeyedState<K>, key: Option<K>, limit: Limit, amount: f64) {
+        let Some(key) = key else {
+            return;
+        };
+        let now = self.now_nanos();
+        self.maybe_evict(state, now);
+
+        if let Some(bucket) = state.buckets.get(&key) {
+            bucket.debit(limit.rate, limit.burst, now, amount);
+            return;
+        }
+
+        if state.entries() >= HARD_CAP_PER_IP_ENTRIES {
+            return;
+        }
+
+        match state.buckets.entry(key) {
+            Entry::Occupied(occupied) => {
+                occupied.get().debit(limit.rate, limit.burst, now, amount);
+            },
+            Entry::Vacant(vacant) => {
+                let bucket = vacant.insert(TokenBucket::new(limit.burst));
+                state.entries.fetch_add(1, Ordering::Relaxed);
+                bucket.debit(limit.rate, limit.burst, now, amount);
+            },
+        }
+    }
+
     /// Read current tokens for response header injection.
     ///
     /// Normalizes IPv4-mapped IPv6 addresses before lookup (defense in

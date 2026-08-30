@@ -26,8 +26,8 @@ pub use security::{
 pub use security::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
 pub use traffic_management::{
     CircuitBreakerFilter, EndpointReselector, EndpointSelectorFilter, GrpcDetectionFilter,
-    IterativeRequestRouterFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus,
-    RouterFilter, StaticResponseFilter, StickySessionsFilter, TimeoutFilter,
+    IterativeRequestRouterFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMeter, RateLimitMode, RedirectFilter,
+    RedirectStatus, RouterFilter, StaticResponseFilter, StickySessionsFilter, TimeoutFilter,
     sticky_sessions::{SessionStore, SessionStoreRegistry},
 };
 pub use transformation::{

@@ -89,6 +89,43 @@ impl TokenBucket {
         }
     }
 
+    /// Debit `amount` tokens, refilling based on elapsed time first.
+    ///
+    /// Unlike [`try_acquire`], this always applies and may drive the
+    /// balance negative. A metered cost such as the tokens a response
+    /// consumed is only known after the request was admitted, so an
+    /// overspend is carried as debt and repaid by refill rather than
+    /// refused. Returns the new balance, which the caller reads as
+    /// "budget remaining" on the next request.
+    ///
+    /// [`try_acquire`]: Self::try_acquire
+    pub(crate) fn debit(&self, rate: f64, burst: f64, now_nanos: u64, amount: f64) -> f64 {
+        loop {
+            let old_tokens_bits = self.tokens.load(Ordering::Acquire);
+            let old_refill = self.last_refill.load(Ordering::Acquire);
+
+            let mut tokens = f64::from_bits(old_tokens_bits);
+
+            let elapsed_nanos = now_nanos.saturating_sub(old_refill);
+            if elapsed_nanos > 0 {
+                let elapsed_secs = nanos_to_secs(elapsed_nanos);
+                tokens = (tokens + elapsed_secs * rate).min(burst);
+            }
+
+            let new_tokens = tokens - amount;
+            let new_bits = new_tokens.to_bits();
+
+            if self
+                .tokens
+                .compare_exchange_weak(old_tokens_bits, new_bits, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.last_refill.fetch_max(now_nanos, Ordering::Release);
+                return new_tokens;
+            }
+        }
+    }
+
     /// Read the last refill timestamp in nanoseconds.
     pub(crate) fn last_refill_nanos(&self) -> u64 {
         self.last_refill.load(Ordering::Acquire)
@@ -177,6 +214,31 @@ mod tests {
         assert!(
             bucket.try_acquire(10.0, 3.0, 0).is_none(),
             "acquisition past burst should fail"
+        );
+    }
+
+    #[test]
+    fn debit_subtracts_a_variable_amount_and_carries_debt() {
+        let bucket = TokenBucket::new(1000.0);
+        // A metered cost debits exactly that many tokens.
+        assert!((bucket.debit(10.0, 1000.0, 0, 400.0) - 600.0).abs() < 1e-9);
+        assert!((bucket.debit(10.0, 1000.0, 0, 400.0) - 200.0).abs() < 1e-9);
+        // Overspend is carried as debt (negative), not floored at zero, so
+        // a caller cannot escape a large response by having little budget.
+        assert!((bucket.debit(10.0, 1000.0, 0, 400.0) + 200.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn debit_debt_is_repaid_by_refill() {
+        let bucket = TokenBucket::new(100.0);
+        assert!(
+            (bucket.debit(10.0, 100.0, 0, 150.0) + 50.0).abs() < 1e-9,
+            "overspend leaves debt"
+        );
+        // 10 s later at 10 tokens/s, 100 refilled but capped at burst: debt cleared.
+        assert!(
+            (bucket.current_tokens(10.0, 100.0, 10_000_000_000) - 50.0).abs() < 1e-9,
+            "refill repays the debt over time"
         );
     }
 

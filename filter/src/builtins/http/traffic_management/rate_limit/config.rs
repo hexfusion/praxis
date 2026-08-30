@@ -58,6 +58,42 @@ pub enum RateLimitMode {
 }
 
 // -----------------------------------------------------------------------------
+// RateLimitMeter
+// -----------------------------------------------------------------------------
+
+/// What each request costs its bucket.
+///
+/// Orthogonal to [`RateLimitMode`], which decides *whose* bucket: so
+/// `mode: per_peer` with `meter: tokens` is a per-peer token budget,
+/// and `mode: per_identity` with `meter: tokens` is a per-tenant one.
+///
+/// ```
+/// use praxis_filter::RateLimitMeter;
+///
+/// let meter: RateLimitMeter = serde_yaml::from_str("requests").unwrap();
+/// assert!(matches!(meter, RateLimitMeter::Requests));
+///
+/// let meter: RateLimitMeter = serde_yaml::from_str("tokens").unwrap();
+/// assert!(matches!(meter, RateLimitMeter::Tokens));
+/// ```
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitMeter {
+    /// One unit per request: a request-rate limit. Debited when the
+    /// request is admitted. This is the default and the historical
+    /// behaviour.
+    #[default]
+    Requests,
+
+    /// The response's token usage: a token-consumption budget. The cost
+    /// is only known once the response has been read, so it is debited
+    /// after the response body finishes, from a metadata key another
+    /// filter (`token_usage`) publishes. `rate` becomes tokens replenished
+    /// per second and `burst` the token budget.
+    Tokens,
+}
+
+// -----------------------------------------------------------------------------
 // RateLimitConfig
 // -----------------------------------------------------------------------------
 
@@ -96,4 +132,18 @@ pub(super) struct RateLimitConfig {
     /// Falls back to `burst` when absent or unusable. `per_identity` only.
     #[serde(default)]
     pub burst_claim: Option<String>,
+
+    /// What each request costs the bucket: one unit (`requests`, the
+    /// default) or the response's token usage (`tokens`).
+    #[serde(default)]
+    pub meter: RateLimitMeter,
+
+    /// Metadata key holding the per-request cost when `meter: tokens`.
+    ///
+    /// Defaults to `token.total`, the key the `token_usage` filter
+    /// publishes. A request whose cost key is absent or unparsable is
+    /// treated as costing nothing, so a missing usage report degrades to
+    /// no debit rather than to a wrong one.
+    #[serde(default)]
+    pub cost_metadata_key: Option<String>,
 }

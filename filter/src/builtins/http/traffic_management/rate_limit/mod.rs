@@ -6,7 +6,7 @@
 mod config;
 mod limiter;
 
-pub use self::config::RateLimitMode;
+pub use self::config::{RateLimitMeter, RateLimitMode};
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
@@ -30,6 +30,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use dashmap::DashMap;
 
 use self::config::RateLimitConfig;
@@ -269,6 +270,12 @@ pub struct RateLimitFilter {
     /// Custom claim holding the principal's burst, `per_identity` only.
     pub(self) burst_claim: Option<String>,
 
+    /// Whether a request costs one unit or its response's token usage.
+    pub(self) meter: RateLimitMeter,
+
+    /// Metadata key read for the per-request cost under `meter: tokens`.
+    pub(self) cost_metadata_key: String,
+
     /// Pre-built `X-RateLimit-*` header names, so the response path inserts
     /// them without re-validating the constant names on every response.
     pub(self) header_limit: http::header::HeaderName,
@@ -330,6 +337,10 @@ impl RateLimitFilter {
     /// let bad: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 0\nburst: 10").unwrap();
     /// assert!(RateLimitFilter::from_config(&bad).is_err());
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear validation, state build, and field init read best inline"
+    )]
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: RateLimitConfig = parse_filter_config("rate_limit", config)?;
 
@@ -360,6 +371,8 @@ impl RateLimitFilter {
             key_claim: cfg.key_claim,
             rate_claim: cfg.rate_claim,
             burst_claim: cfg.burst_claim,
+            meter: cfg.meter,
+            cost_metadata_key: cfg.cost_metadata_key.unwrap_or_else(|| "token.total".to_owned()),
             // Lowercase literals: HeaderName::from_static panics on uppercase,
             // and HeaderMap stores names lowercased anyway, matching the wire
             // output of the previous from_bytes(HEADER_RATELIMIT_*) path.
@@ -380,7 +393,23 @@ impl HttpFilter for RateLimitFilter {
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let principal = self.principal(ctx);
         let limit = self.resolve_limit(ctx);
-        match self.try_acquire_for(ctx.client_addr, principal.as_deref(), limit) {
+        // `requests` debits one unit at admission. `tokens` cannot know
+        // the cost until the response has been read, so it only checks
+        // that budget remains and defers the debit to `on_response_body`.
+        // An admitted request may overspend the last of the budget by one
+        // response; the overspend is carried as debt and repaid by refill.
+        let outcome = match self.meter {
+            RateLimitMeter::Requests => self.try_acquire_for(ctx.client_addr, principal.as_deref(), limit),
+            RateLimitMeter::Tokens => {
+                let remaining = self.current_remaining(ctx.client_addr, principal.as_deref(), limit);
+                if remaining >= 1.0 {
+                    Ok(remaining)
+                } else {
+                    Err(remaining)
+                }
+            },
+        };
+        match outcome {
             Ok(_remaining) => Ok(FilterAction::Continue),
             Err(remaining) => {
                 tracing::info!(
@@ -419,6 +448,35 @@ impl HttpFilter for RateLimitFilter {
                     resp.headers.insert(name, hv);
                     ctx.response_headers_modified = true;
                 }
+            }
+        }
+
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        let _ = body;
+        // Token metering debits the response's usage once, when the body
+        // has finished, from the cost key a prior filter (`token_usage`)
+        // published. Response filters run in reverse pipeline order, so
+        // placing `rate_limit` before `token_usage` in the chain makes
+        // this run after the count is final. An absent or unparsable cost
+        // debits nothing rather than a wrong amount.
+        if self.meter == RateLimitMeter::Tokens && end_of_stream {
+            let cost = ctx
+                .get_metadata(&self.cost_metadata_key)
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|amount| *amount > 0.0);
+            if let Some(amount) = cost {
+                let principal = self.principal(ctx);
+                let limit = self.resolve_limit(ctx);
+                self.debit_for(ctx.client_addr, principal.as_deref(), limit, amount);
+                tracing::debug!(amount, "rate_limit: debited token usage");
             }
         }
 
