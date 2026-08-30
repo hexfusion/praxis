@@ -36,7 +36,7 @@ use dashmap::DashMap;
 use self::config::RateLimitConfig;
 use super::token_bucket::TokenBucket;
 use crate::{
-    FilterAction, FilterError, Rejection,
+    BodyAccess, FilterAction, FilterError, Rejection,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -388,6 +388,16 @@ impl RateLimitFilter {
 impl HttpFilter for RateLimitFilter {
     fn name(&self) -> &'static str {
         "rate_limit"
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        // Token metering reads the response's usage to debit it, so the
+        // pipeline must deliver the response body to `on_response_body`.
+        // Request metering never looks at the body.
+        match self.meter {
+            RateLimitMeter::Tokens => BodyAccess::ReadOnly,
+            RateLimitMeter::Requests => BodyAccess::None,
+        }
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
