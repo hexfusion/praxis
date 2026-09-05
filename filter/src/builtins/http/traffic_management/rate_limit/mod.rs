@@ -420,7 +420,10 @@ impl HttpFilter for RateLimitFilter {
         }
     }
 
-    #[expect(clippy::too_many_lines, reason = "admission plus the token-mode stash read best inline")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "admission plus the token-mode stash read best inline"
+    )]
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let principal = self.principal(ctx);
         let limit = self.resolve_limit(ctx);

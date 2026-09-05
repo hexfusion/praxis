@@ -17,12 +17,14 @@ State is all managed locally.
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `mode` | `global` \| `per_ip` \| `per_identity` \| `per_peer` | yes | How to partition buckets: one shared, per source IP, or per authenticated principal. |
+| `mode` | `global` \| `per_ip` \| `per_identity` \| `per_peer` \| `per_principal` | yes | How to partition buckets: one shared, per source IP, or per authenticated principal. |
 | `rate` | number | yes | Tokens replenished per second. |
 | `burst` | integer | yes | Maximum bucket capacity. |
 | `key_claim` | string | no | Custom claim naming the bucket, instead of the subject id. Lets several principals share one bucket (a tenant, a site) when the identity carries a coarser grouping than its subject. `per_identity` only. |
 | `rate_claim` | string | no | Custom claim holding this principal's tokens per second. The claim is signed by the identity provider, so the limit is asserted by the issuer rather than by the caller. Falls back to `rate` when absent or unusable. `per_identity` only. |
 | `burst_claim` | string | no | Custom claim holding this principal's bucket capacity. Falls back to `burst` when absent or unusable. `per_identity` only. |
+| `meter` | `requests` \| `tokens` | no | What each request costs the bucket: one unit (`requests`, the default) or the response's token usage (`tokens`). |
+| `cost_metadata_key` | string | no | Metadata key holding the per-request cost when `meter: tokens`. Defaults to `token.total`, the key the `token_usage` filter publishes. A request whose cost key is absent or unparsable is treated as costing nothing, so a missing usage report degrades to no debit rather than to a wrong one. |
 
 ## Example
 

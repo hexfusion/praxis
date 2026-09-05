@@ -24,6 +24,7 @@ A `spiffe_id` is compared in full, including the trust domain, and only against 
 | `trusted_peers[].organization` | string | no | X.509 subject organization (`O=` field). Weaker than certificate digest — useful for bootstrap and controlled test configurations where cert digests are not known ahead of time. |
 | `trusted_peers[].serial_number` | string | no | Certificate serial number. |
 | `trusted_peers[].spiffe_id` | string | no | SPIFFE ID carried in the certificate's URI SAN. The strongest match field: it names the peer, and unlike `cert_digest` it survives reissue. |
+| `required` | bool | no | Whether a peer identity must be present. `true` (default): a request with no verified peer identity is rejected, the standalone mTLS-gateway posture. `false`: a request with no peer identity continues, letting a later filter resolve a different credential (e.g. a bearer JWT). A peer identity that *is* present but untrusted is still rejected. Use this when one chain admits both peer sites and users and a downstream default-deny gate (`rate_limit: per_principal`) refuses anything that resolved no identity of either kind. |
 
 ## Example
 

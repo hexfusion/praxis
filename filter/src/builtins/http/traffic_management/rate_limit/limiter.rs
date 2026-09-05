@@ -188,7 +188,10 @@ impl RateLimitFilter {
     /// so a provider that publishes nothing keeps the static behaviour
     /// rather than no limit at all.
     pub(super) fn resolve_limit(&self, ctx: &HttpFilterContext<'_>) -> Limit {
-        if !matches!(self.state, RateLimitState::PerIdentity(_) | RateLimitState::PerPrincipal(_)) {
+        if !matches!(
+            self.state,
+            RateLimitState::PerIdentity(_) | RateLimitState::PerPrincipal(_)
+        ) {
             return self.static_limit();
         }
         // A user principal can carry claim-signed limits; a peer principal
