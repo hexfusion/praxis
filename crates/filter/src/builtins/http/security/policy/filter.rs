@@ -666,8 +666,10 @@ impl PolicyFilter {
     /// HTTP request line + headers into the attribute bag, and evaluate the
     /// `global` policy via the `http.request` hook. A deny maps to a
     /// plain HTTP response ([`super::error::http_authz_rejection`]); an
-    /// identity failure is the usual 401. Authorization runs here (not the
-    /// body phase) because it needs no request body.
+    /// identity failure is the usual 401. Two entry points: the request phase
+    /// with `model` `None`, for a policy that gates on the request line and
+    /// headers alone; and the body phase with `model` `Some`, when
+    /// `authorize_on_model` defers the decision until the body model is parsed.
     #[expect(
         clippy::large_stack_frames,
         clippy::too_many_lines,

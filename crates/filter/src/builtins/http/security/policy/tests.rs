@@ -367,6 +367,34 @@ async fn authorize_on_model_fails_closed_without_a_model() {
     );
 }
 
+/// An empty body carries no `model`, so `llm.model_id` is unset and the
+/// membership rule fails closed. The explicit no-model malformed-body case.
+#[tokio::test(flavor = "multi_thread")]
+async fn authorize_on_model_fails_closed_on_an_empty_body() {
+    let (_dir, path) = write_l7_model_authz_config();
+    let filter = build_filter_authz_on_model(path);
+
+    let action = dispatch_model_authz(&filter, b"{}").await;
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "an empty body has no model and must fail closed; got {action:?}"
+    );
+}
+
+/// A non-string `model` (here a number) is not a usable model id, so it leaves
+/// the membership rule with nothing to match and fails closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn authorize_on_model_fails_closed_on_a_non_string_model() {
+    let (_dir, path) = write_l7_model_authz_config();
+    let filter = build_filter_authz_on_model(path);
+
+    let action = dispatch_model_authz(&filter, br#"{"model":123}"#).await;
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "a non-string model must fail closed, not be coerced into a match; got {action:?}"
+    );
+}
+
 /// Write a policy document that declares BOTH a `global` HTTP policy (canonical
 /// `authentication:`/`authorization:` form, admitting only GET) AND an entity
 /// route (the `echo` tool). Derives the combined shape
