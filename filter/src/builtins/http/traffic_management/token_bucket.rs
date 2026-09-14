@@ -126,6 +126,80 @@ impl TokenBucket {
         }
     }
 
+    /// Try to consume `amount` tokens, refilling based on elapsed time first.
+    ///
+    /// The multi-token analogue of [`try_acquire`]: it succeeds only when the
+    /// refilled balance covers `amount`, so a reservation is refused up front
+    /// rather than admitted into debt. Returns `Some(remaining)` on success,
+    /// `None` when the balance is short.
+    ///
+    /// [`try_acquire`]: Self::try_acquire
+    pub(crate) fn try_reserve(&self, amount: f64, rate: f64, burst: f64, now_nanos: u64) -> Option<f64> {
+        loop {
+            let old_tokens_bits = self.tokens.load(Ordering::Acquire);
+            let old_refill = self.last_refill.load(Ordering::Acquire);
+
+            let mut tokens = f64::from_bits(old_tokens_bits);
+
+            let elapsed_nanos = now_nanos.saturating_sub(old_refill);
+            if elapsed_nanos > 0 {
+                let elapsed_secs = nanos_to_secs(elapsed_nanos);
+                tokens = (tokens + elapsed_secs * rate).min(burst);
+            }
+
+            if tokens < amount {
+                return None;
+            }
+
+            let new_tokens = tokens - amount;
+            let new_bits = new_tokens.to_bits();
+
+            if self
+                .tokens
+                .compare_exchange_weak(old_tokens_bits, new_bits, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.last_refill.fetch_max(now_nanos, Ordering::Release);
+                return Some(new_tokens);
+            }
+        }
+    }
+
+    /// Credit `amount` tokens back, capped at `burst`, refilling by time first.
+    ///
+    /// The refund half of reserve-then-reconcile: it returns reserved-but-unspent
+    /// tokens without letting the balance exceed the ceiling. Unlike a negative
+    /// [`debit`], it caps at `burst`, so an over-reservation cannot inflate the
+    /// bucket above its capacity. Returns the new balance.
+    ///
+    /// [`debit`]: Self::debit
+    pub(crate) fn release(&self, amount: f64, rate: f64, burst: f64, now_nanos: u64) -> f64 {
+        loop {
+            let old_tokens_bits = self.tokens.load(Ordering::Acquire);
+            let old_refill = self.last_refill.load(Ordering::Acquire);
+
+            let mut tokens = f64::from_bits(old_tokens_bits);
+
+            let elapsed_nanos = now_nanos.saturating_sub(old_refill);
+            if elapsed_nanos > 0 {
+                let elapsed_secs = nanos_to_secs(elapsed_nanos);
+                tokens = (tokens + elapsed_secs * rate).min(burst);
+            }
+
+            let new_tokens = (tokens + amount).min(burst);
+            let new_bits = new_tokens.to_bits();
+
+            if self
+                .tokens
+                .compare_exchange_weak(old_tokens_bits, new_bits, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.last_refill.fetch_max(now_nanos, Ordering::Release);
+                return new_tokens;
+            }
+        }
+    }
+
     /// Read the last refill timestamp in nanoseconds.
     pub(crate) fn last_refill_nanos(&self) -> u64 {
         self.last_refill.load(Ordering::Acquire)
@@ -374,6 +448,31 @@ mod tests {
         assert!(
             remaining.is_some_and(|r| r <= 5.0),
             "tokens after refill should not exceed burst, got {remaining:?}"
+        );
+    }
+
+    #[test]
+    fn try_reserve_requires_the_full_amount() {
+        let bucket = TokenBucket::new(100.0);
+        assert_eq!(bucket.try_reserve(30.0, 0.0, 100.0, 0), Some(70.0), "an affordable reserve succeeds");
+        assert_eq!(bucket.try_reserve(80.0, 0.0, 100.0, 0), None, "cannot reserve more than remains");
+        assert!(
+            bucket.try_reserve(70.0, 0.0, 100.0, 0).is_some(),
+            "exactly the remaining balance reserves"
+        );
+    }
+
+    #[test]
+    fn release_credits_capped_at_burst() {
+        let bucket = TokenBucket::new(100.0);
+        assert_eq!(bucket.try_reserve(60.0, 0.0, 100.0, 0), Some(40.0));
+        assert!(
+            (bucket.release(30.0, 0.0, 100.0, 0) - 70.0).abs() < 1e-9,
+            "a refund restores the reserved-but-unspent tokens"
+        );
+        assert!(
+            (bucket.release(1000.0, 0.0, 100.0, 0) - 100.0).abs() < 1e-9,
+            "a refund never lifts the balance above burst"
         );
     }
 

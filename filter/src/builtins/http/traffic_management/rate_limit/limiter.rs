@@ -10,7 +10,8 @@ use praxis_core::connectivity::normalize_mapped_ipv4;
 
 use super::{
     HARD_CAP_PER_IP_ENTRIES, HEADER_RATELIMIT_LIMIT, HEADER_RATELIMIT_REMAINING, HEADER_RATELIMIT_RESET, KeyedState,
-    Limit, MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState,
+    Limit, MAX_PER_IP_ENTRIES, META_TOKEN_BURST, META_TOKEN_PRINCIPAL, META_TOKEN_RATE, META_TOKEN_RESERVED,
+    RateLimitFilter, RateLimitState,
 };
 use crate::{
     AuthenticatedIdentity, builtins::http::traffic_management::token_bucket::TokenBucket, filter::HttpFilterContext,
@@ -374,6 +375,147 @@ impl RateLimitFilter {
                 state.entries.fetch_add(1, Ordering::Relaxed);
                 bucket.debit(limit.rate, limit.burst, now, amount);
             },
+        }
+    }
+
+    /// Reserve `amount` tokens for the caller at admission.
+    ///
+    /// The reserve half of reserve-then-reconcile: unlike [`try_acquire_for`],
+    /// which consumes one unit, it charges the estimated cost up front and
+    /// refuses a request that cannot afford it, so a large request is stopped
+    /// before the backend rather than admitted into debt. A request with no
+    /// key is refused, matching [`acquire_keyed`].
+    ///
+    /// [`try_acquire_for`]: Self::try_acquire_for
+    /// [`acquire_keyed`]: Self::acquire_keyed
+    pub(super) fn try_reserve_for(
+        &self,
+        client_addr: Option<IpAddr>,
+        principal: Option<&str>,
+        limit: Limit,
+        amount: f64,
+    ) -> Result<f64, f64> {
+        match &self.state {
+            RateLimitState::Global(bucket) => Self::reserve_from_bucket(bucket, amount, limit, self.now_nanos()),
+            RateLimitState::PerIp(state) => {
+                self.reserve_keyed(state, client_addr.map(normalize_mapped_ipv4), limit, amount)
+            },
+            RateLimitState::PerIdentity(state)
+            | RateLimitState::PerPeer(state)
+            | RateLimitState::PerPrincipal(state) => {
+                self.reserve_keyed(state, principal.map(str::to_owned), limit, amount)
+            },
+        }
+    }
+
+    /// Keyed reservation, get-or-creating the bucket like [`acquire_keyed`].
+    ///
+    /// [`acquire_keyed`]: Self::acquire_keyed
+    fn reserve_keyed<K: Eq + Hash>(
+        &self,
+        state: &KeyedState<K>,
+        key: Option<K>,
+        limit: Limit,
+        amount: f64,
+    ) -> Result<f64, f64> {
+        let Some(key) = key else {
+            return Err(0.0);
+        };
+        let now = self.now_nanos();
+        self.maybe_evict(state, now);
+
+        if let Some(bucket) = state.buckets.get(&key) {
+            return Self::reserve_from_bucket(&bucket, amount, limit, now);
+        }
+
+        if state.entries() >= HARD_CAP_PER_IP_ENTRIES {
+            return Err(0.0);
+        }
+
+        match state.buckets.entry(key) {
+            Entry::Occupied(occupied) => Self::reserve_from_bucket(occupied.get(), amount, limit, now),
+            Entry::Vacant(vacant) => {
+                let bucket = vacant.insert(TokenBucket::new(limit.burst));
+                state.entries.fetch_add(1, Ordering::Relaxed);
+                Self::reserve_from_bucket(&bucket, amount, limit, now)
+            },
+        }
+    }
+
+    /// Try to reserve `amount` from a single bucket.
+    fn reserve_from_bucket(bucket: &TokenBucket, amount: f64, limit: Limit, now: u64) -> Result<f64, f64> {
+        match bucket.try_reserve(amount, limit.rate, limit.burst, now) {
+            Some(remaining) => Ok(remaining),
+            None => Err(bucket.current_tokens(limit.rate, limit.burst, now)),
+        }
+    }
+
+    /// Refund `amount` reserved-but-unspent tokens after the response.
+    ///
+    /// The reconcile half of reserve-then-reconcile: the mirror of
+    /// [`debit_for`] for a credit, capped at capacity by [`TokenBucket::release`].
+    ///
+    /// [`debit_for`]: Self::debit_for
+    /// [`TokenBucket::release`]: crate::builtins::http::traffic_management::token_bucket::TokenBucket::release
+    pub(super) fn release_for(&self, client_addr: Option<IpAddr>, principal: Option<&str>, limit: Limit, amount: f64) {
+        match &self.state {
+            RateLimitState::Global(bucket) => {
+                bucket.release(amount, limit.rate, limit.burst, self.now_nanos());
+            },
+            RateLimitState::PerIp(state) => {
+                self.release_keyed(state, client_addr.map(normalize_mapped_ipv4), limit, amount);
+            },
+            RateLimitState::PerIdentity(state)
+            | RateLimitState::PerPeer(state)
+            | RateLimitState::PerPrincipal(state) => {
+                self.release_keyed(state, principal.map(str::to_owned), limit, amount);
+            },
+        }
+    }
+
+    /// Keyed refund into an existing bucket only.
+    ///
+    /// A missing bucket was evicted between reserve and reconcile. Recreating
+    /// one to credit a refund would hand out tokens the reservation never held,
+    /// so the refund is dropped, which only over-charges and never over-grants.
+    fn release_keyed<K: Eq + Hash>(&self, state: &KeyedState<K>, key: Option<K>, limit: Limit, amount: f64) {
+        let Some(key) = key else {
+            return;
+        };
+        if let Some(bucket) = state.buckets.get(&key) {
+            bucket.release(amount, limit.rate, limit.burst, self.now_nanos());
+        }
+    }
+
+    /// Reconcile a finished token-metered request against its bucket.
+    ///
+    /// A reserve request refunds the unspent remainder of its estimate (reserve
+    /// minus actual, never negative because the estimate never underestimates).
+    /// A plain token request debits the actual cost once. Each keys on the
+    /// principal and limit stashed at admission, since the identity that
+    /// resolved them is gone by the response phase. An absent actual keeps the
+    /// full reserve charged, refunding nothing rather than a wrong amount.
+    pub(super) fn reconcile_tokens(&self, ctx: &HttpFilterContext<'_>) {
+        let actual = ctx
+            .get_metadata(&self.cost_metadata_key)
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|amount| *amount > 0.0);
+        let reserved = ctx.get_metadata(META_TOKEN_RESERVED).and_then(|v| v.parse::<f64>().ok());
+        let principal = ctx.get_metadata(META_TOKEN_PRINCIPAL).map(str::to_owned);
+        let limit = Limit {
+            rate: ctx.get_metadata(META_TOKEN_RATE).and_then(|v| v.parse().ok()).unwrap_or(self.rate),
+            burst: ctx.get_metadata(META_TOKEN_BURST).and_then(|v| v.parse().ok()).unwrap_or(self.burst),
+        };
+
+        if let Some(reserve) = reserved {
+            let refund = (reserve - actual.unwrap_or(reserve)).max(0.0);
+            if refund > 0.0 {
+                self.release_for(ctx.client_addr, principal.as_deref(), limit, refund);
+                tracing::debug!(reserve, refund, principal = ?principal, "rate_limit: reconciled reserve");
+            }
+        } else if let Some(amount) = actual {
+            self.debit_for(ctx.client_addr, principal.as_deref(), limit, amount);
+            tracing::debug!(amount, principal = ?principal, "rate_limit: debited token usage");
         }
     }
 

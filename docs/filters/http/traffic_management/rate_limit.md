@@ -25,6 +25,8 @@ State is all managed locally.
 | `burst_claim` | string | no | Custom claim holding this principal's bucket capacity. Falls back to `burst` when absent or unusable. `per_identity` only. |
 | `meter` | `requests` \| `tokens` | no | What each request costs the bucket: one unit (`requests`, the default) or the response's token usage (`tokens`). |
 | `cost_metadata_key` | string | no | Metadata key holding the per-request cost when `meter: tokens`. Defaults to `token.total`, the key the `token_usage` filter publishes. A request whose cost key is absent or unparsable is treated as costing nothing, so a missing usage report degrades to no debit rather than to a wrong one. |
+| `reserve` | bool | no | Reserve the estimated cost at admission instead of admitting on any remaining budget. `meter: tokens` only. When set, the estimate is charged up front and a request that cannot afford it is refused with 429, then the reserve is reconciled to the actual cost after the response. When unset (the default), the limiter admits while any budget remains and debits the actual after, which lets one response overspend the budget into debt. |
+| `reserve_metadata_key` | string | no | Metadata key holding the per-request estimate to reserve at admission. Defaults to `token.estimate_total`, symmetric with `cost_metadata_key`. Effective only when `reserve` is set. An absent or unparsable estimate falls back to admit-on-remaining, so a missing estimate degrades to the non-reserve behaviour rather than refusing. |
 
 ## Example
 

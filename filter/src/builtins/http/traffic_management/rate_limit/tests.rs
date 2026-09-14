@@ -314,6 +314,8 @@ fn per_ip_eviction_skips_when_below_threshold() {
         burst_claim: None,
         meter: RateLimitMeter::Requests,
         cost_metadata_key: "token.total".to_owned(),
+        reserve: false,
+        reserve_metadata_key: "token.estimate_total".to_owned(),
         rate,
         burst,
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
@@ -461,6 +463,8 @@ fn hard_cap_rejects_new_ips() {
         burst_claim: None,
         meter: RateLimitMeter::Requests,
         cost_metadata_key: "token.total".to_owned(),
+        reserve: false,
+        reserve_metadata_key: "token.estimate_total".to_owned(),
         rate,
         burst,
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
@@ -499,6 +503,8 @@ fn hard_cap_allows_known_ips() {
         burst_claim: None,
         meter: RateLimitMeter::Requests,
         cost_metadata_key: "token.total".to_owned(),
+        reserve: false,
+        reserve_metadata_key: "token.estimate_total".to_owned(),
         rate,
         burst,
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
@@ -624,6 +630,8 @@ fn make_eviction_filter(rate: f64, burst: f64) -> RateLimitFilter {
         burst_claim: None,
         meter: RateLimitMeter::Requests,
         cost_metadata_key: "token.total".to_owned(),
+        reserve: false,
+        reserve_metadata_key: "token.estimate_total".to_owned(),
         rate,
         burst,
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
@@ -652,6 +660,8 @@ fn make_filter(mode: &str, rate: f64, burst: u32) -> RateLimitFilter {
         burst_claim: keyed.then(|| "grid_burst".to_owned()),
         meter: RateLimitMeter::Requests,
         cost_metadata_key: "token.total".to_owned(),
+        reserve: false,
+        reserve_metadata_key: "token.estimate_total".to_owned(),
         rate,
         burst: burst_f,
         header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
@@ -1146,5 +1156,129 @@ async fn per_peer_ignores_a_bearer_identity() {
     assert!(
         matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
         "the token claiming site-d must not open a second bucket"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// reserve mode (reserve: true)
+// -----------------------------------------------------------------------------
+
+/// A per_identity token-budget filter in reserve mode, refill negligible.
+fn reserve_filter(burst: u32) -> Box<dyn crate::filter::HttpFilter> {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        "mode: per_identity\nrate: 0.0001\nburst: {burst}\nmeter: tokens\nreserve: true"
+    ))
+    .unwrap();
+    RateLimitFilter::from_config(&yaml).unwrap()
+}
+
+#[test]
+fn reserve_requires_the_token_meter() {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("mode: per_identity\nrate: 10\nburst: 100\nreserve: true").unwrap();
+    assert!(
+        RateLimitFilter::from_config(&yaml).is_err(),
+        "reserve on the default requests meter is a config error"
+    );
+}
+
+#[tokio::test]
+async fn reserve_refuses_an_estimate_above_the_whole_budget() {
+    let filter = reserve_filter(500);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = ctx_with_identity(&req, "alice", &[]);
+    ctx.set_metadata("token.estimate_total", "800"); // > 500 ceiling
+
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
+        "an estimate above the ceiling can never be afforded and is refused up front"
+    );
+}
+
+#[tokio::test]
+async fn reserve_refuses_up_front_when_the_estimate_exceeds_remaining() {
+    let filter = reserve_filter(1000);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+
+    // First request reserves 800 of 1000.
+    let mut ctx1 = ctx_with_identity(&req, "alice", &[]);
+    ctx1.set_metadata("token.estimate_total", "800");
+    assert!(matches!(
+        filter.on_request(&mut ctx1).await.unwrap(),
+        FilterAction::Continue
+    ));
+
+    // A second 800-token request cannot fit in the ~200 that remain. Reserve
+    // refuses it at admission rather than admitting it into overspend, which is
+    // what the plain token meter would do.
+    let mut ctx2 = ctx_with_identity(&req, "alice", &[]);
+    ctx2.set_metadata("token.estimate_total", "800");
+    assert!(
+        matches!(filter.on_request(&mut ctx2).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
+        "reserve refuses a request the remaining budget cannot cover, before the backend"
+    );
+}
+
+#[tokio::test]
+async fn reserve_reconcile_refunds_the_unspent_estimate() {
+    let filter = reserve_filter(1000);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+
+    // Reserve 800, but the response actually used only 100.
+    let mut ctx = ctx_with_identity(&req, "alice", &[]);
+    ctx.set_metadata("token.estimate_total", "800");
+    assert!(matches!(
+        filter.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Continue
+    ));
+    ctx.set_metadata("token.total", "100");
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut None, true).unwrap(),
+        FilterAction::Continue
+    ));
+
+    // Only 100 was truly spent, so a second 800-token request now fits. Without
+    // the refund the first reservation would have left ~200 and refused it.
+    let mut ctx2 = ctx_with_identity(&req, "alice", &[]);
+    ctx2.set_metadata("token.estimate_total", "800");
+    assert!(
+        matches!(filter.on_request(&mut ctx2).await.unwrap(), FilterAction::Continue),
+        "reconcile returned the 700 unspent tokens, so the next request fits"
+    );
+}
+
+#[tokio::test]
+async fn reserve_without_an_estimate_falls_back_to_admit_on_remaining() {
+    let filter = reserve_filter(1000);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+
+    // No estimate metadata: reserve cannot charge, so it admits while budget
+    // remains and debits the actual after, the non-reserve behaviour.
+    let mut ctx = ctx_with_identity(&req, "alice", &[]);
+    assert!(matches!(
+        filter.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Continue
+    ));
+    ctx.set_metadata("token.total", "100");
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut None, true).unwrap(),
+        FilterAction::Continue
+    ));
+}
+
+#[tokio::test]
+async fn reserve_reads_the_configured_estimate_key() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "mode: per_identity\nrate: 0.0001\nburst: 500\nmeter: tokens\nreserve: true\nreserve_metadata_key: token.custom_estimate",
+    )
+    .unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).unwrap();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = ctx_with_identity(&req, "alice", &[]);
+    ctx.set_metadata("token.custom_estimate", "800"); // > 500 ceiling
+
+    assert!(
+        matches!(filter.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(r) if r.status == 429),
+        "reserve reads the configured estimate key, not the default"
     );
 }

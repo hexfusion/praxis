@@ -88,6 +88,15 @@ const META_TOKEN_RATE: &str = "rate_limit.token.rate";
 /// Metadata key: the token-mode budget (burst) resolved at request time.
 const META_TOKEN_BURST: &str = "rate_limit.token.burst";
 
+/// Metadata key: the amount reserved at admission, read back to reconcile it
+/// against the actual cost after the response. Absent when no reservation was
+/// made, which marks the request for the plain debit path instead.
+const META_TOKEN_RESERVED: &str = "rate_limit.token.reserved";
+
+/// Default metadata key holding the per-request estimate to reserve, symmetric
+/// with `token.total` on the cost side.
+const DEFAULT_RESERVE_KEY: &str = "token.estimate_total";
+
 // -----------------------------------------------------------------------------
 // RateLimitState
 // -----------------------------------------------------------------------------
@@ -292,6 +301,13 @@ pub struct RateLimitFilter {
     /// Metadata key read for the per-request cost under `meter: tokens`.
     pub(self) cost_metadata_key: String,
 
+    /// Whether admission reserves the estimate (reserve-then-reconcile) or
+    /// admits on remaining budget and debits the actual after.
+    pub(self) reserve: bool,
+
+    /// Metadata key read for the per-request estimate under reserve mode.
+    pub(self) reserve_metadata_key: String,
+
     /// Pre-built `X-RateLimit-*` header names, so the response path inserts
     /// them without re-validating the constant names on every response.
     pub(self) header_limit: http::header::HeaderName,
@@ -375,6 +391,10 @@ impl RateLimitFilter {
 
         Self::validate_claims(&cfg)?;
 
+        if cfg.reserve && cfg.meter != RateLimitMeter::Tokens {
+            return Err("rate_limit: reserve requires meter: tokens".into());
+        }
+
         let burst = f64::from(cfg.burst);
         let state = match cfg.mode {
             RateLimitMode::Global => RateLimitState::Global(TokenBucket::new(burst)),
@@ -393,6 +413,8 @@ impl RateLimitFilter {
             burst_claim: cfg.burst_claim,
             meter: cfg.meter,
             cost_metadata_key: cfg.cost_metadata_key.unwrap_or_else(|| "token.total".to_owned()),
+            reserve: cfg.reserve,
+            reserve_metadata_key: cfg.reserve_metadata_key.unwrap_or_else(|| DEFAULT_RESERVE_KEY.to_owned()),
             // Lowercase literals: HeaderName::from_static panics on uppercase,
             // and HeaderMap stores names lowercased anyway, matching the wire
             // output of the previous from_bytes(HEADER_RATELIMIT_*) path.
@@ -446,11 +468,27 @@ impl HttpFilter for RateLimitFilter {
         let outcome = match self.meter {
             RateLimitMeter::Requests => self.try_acquire_for(ctx.client_addr, principal.as_deref(), limit),
             RateLimitMeter::Tokens => {
-                let remaining = self.current_remaining(ctx.client_addr, principal.as_deref(), limit);
-                if remaining >= 1.0 {
-                    Ok(remaining)
+                // Reserve mode charges the estimate up front and refuses an
+                // unaffordable request (short budget, or an estimate above the
+                // whole bucket). Without an estimate, or with reserve off, fall
+                // back to admit-while-budget-remains and debit the actual after.
+                let estimate = self
+                    .reserve
+                    .then(|| {
+                        ctx.get_metadata(&self.reserve_metadata_key)
+                            .and_then(|v| v.parse::<f64>().ok())
+                            .filter(|amount| *amount > 0.0)
+                    })
+                    .flatten();
+                if let Some(amount) = estimate {
+                    let result = self.try_reserve_for(ctx.client_addr, principal.as_deref(), limit, amount);
+                    if result.is_ok() {
+                        ctx.set_metadata(META_TOKEN_RESERVED, amount.to_string());
+                    }
+                    result
                 } else {
-                    Err(remaining)
+                    let remaining = self.current_remaining(ctx.client_addr, principal.as_deref(), limit);
+                    if remaining >= 1.0 { Ok(remaining) } else { Err(remaining) }
                 }
             },
         };
@@ -513,29 +551,7 @@ impl HttpFilter for RateLimitFilter {
         // this run after the count is final. An absent or unparsable cost
         // debits nothing rather than a wrong amount.
         if self.meter == RateLimitMeter::Tokens && end_of_stream {
-            let cost = ctx
-                .get_metadata(&self.cost_metadata_key)
-                .and_then(|v| v.parse::<f64>().ok())
-                .filter(|amount| *amount > 0.0);
-            if let Some(amount) = cost {
-                // Use the principal and limit stashed at request time: the
-                // identity that resolved them (e.g. an authenticated user) is
-                // gone by the response phase. per_peer stashes the same value it
-                // would re-derive, so this path is uniform across modes.
-                let principal = ctx.get_metadata(META_TOKEN_PRINCIPAL).map(str::to_owned);
-                let limit = Limit {
-                    rate: ctx
-                        .get_metadata(META_TOKEN_RATE)
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(self.rate),
-                    burst: ctx
-                        .get_metadata(META_TOKEN_BURST)
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(self.burst),
-                };
-                self.debit_for(ctx.client_addr, principal.as_deref(), limit, amount);
-                tracing::debug!(amount, principal = ?principal, "rate_limit: debited token usage");
-            }
+            self.reconcile_tokens(ctx);
         }
 
         Ok(FilterAction::Continue)

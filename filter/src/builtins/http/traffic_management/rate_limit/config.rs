@@ -165,4 +165,24 @@ pub(super) struct RateLimitConfig {
     /// no debit rather than to a wrong one.
     #[serde(default)]
     pub cost_metadata_key: Option<String>,
+
+    /// Reserve the estimated cost at admission instead of admitting on any
+    /// remaining budget. `meter: tokens` only.
+    ///
+    /// When set, the estimate is charged up front and a request that cannot
+    /// afford it is refused with 429, then the reserve is reconciled to the
+    /// actual cost after the response. When unset (the default), the limiter
+    /// admits while any budget remains and debits the actual after, which lets
+    /// one response overspend the budget into debt.
+    #[serde(default)]
+    pub reserve: bool,
+
+    /// Metadata key holding the per-request estimate to reserve at admission.
+    ///
+    /// Defaults to `token.estimate_total`, symmetric with `cost_metadata_key`.
+    /// Effective only when `reserve` is set. An absent or unparsable estimate
+    /// falls back to admit-on-remaining, so a missing estimate degrades to the
+    /// non-reserve behaviour rather than refusing.
+    #[serde(default)]
+    pub reserve_metadata_key: Option<String>,
 }
