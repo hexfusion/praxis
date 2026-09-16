@@ -241,7 +241,8 @@ fn load_crls(paths: &[String]) -> Result<Vec<CertificateRevocationListDer<'stati
 }
 
 /// Build a [`RootCertStore`] from a PEM bundle, returning an error detail string
-/// the caller maps to its own [`TlsError`] variant.
+/// the caller maps to its own [`TlsError`] variant, so the same bytes-to-store
+/// logic serves both a file-loading listener and the pinned client config.
 ///
 /// # Errors
 ///
@@ -249,7 +250,7 @@ fn load_crls(paths: &[String]) -> Result<Vec<CertificateRevocationListDer<'stati
 /// or a certificate is rejected as a trust anchor.
 ///
 /// [`RootCertStore`]: rustls::RootCertStore
-fn roots_from_pem(pem: &[u8]) -> Result<RootCertStore, String> {
+pub(crate) fn roots_from_pem(pem: &[u8]) -> Result<RootCertStore, String> {
     let certs: Vec<_> = CertificateDer::pem_slice_iter(pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("failed to parse PEM: {e}"))?;

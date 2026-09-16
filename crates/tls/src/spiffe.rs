@@ -3,10 +3,11 @@
 
 //! SPIFFE identity read and validated from a certificate.
 //!
-//! One home for the SPIFFE domain logic. A SPIFFE certificate names its bearer
-//! with exactly one URI SAN. The listener validates the whole X.509-SVID leaf
-//! against the standard (standards/X509-SVID.md) and authorizes a peer whose
-//! identity is in an allowlist (`authorize_peer`).
+//! One home for the SPIFFE domain logic both verifiers share. A SPIFFE
+//! certificate names its bearer with exactly one URI SAN. Both validate the whole
+//! X.509-SVID leaf against the standard (standards/X509-SVID.md): the connecting
+//! side pins one exact identity (`svid_id_matches`), the listener side authorizes
+//! a peer whose identity is in an allowlist (`authorize_peer`).
 
 use std::sync::Arc;
 
@@ -64,6 +65,16 @@ pub(crate) fn authorize_peer(leaf_der: &[u8], allowed: &[Arc<str>]) -> PeerAuth 
     } else {
         PeerAuth::NotAllowed(id)
     }
+}
+
+/// Whether `leaf_der` is a valid X.509-SVID leaf whose SPIFFE ID equals
+/// `expected`. The connecting side's pin, allocation-free (the id is borrowed and
+/// compared in place). A parse failure or unmet rule returns `false` (fail closed).
+pub(crate) fn svid_id_matches(leaf_der: &[u8], expected: &str) -> bool {
+    let Ok((_, cert)) = X509Certificate::from_der(leaf_der) else {
+        return false;
+    };
+    validated_svid_id(&cert) == Some(expected)
 }
 
 /// The SPIFFE ID of `leaf_der` if it is a valid X.509-SVID leaf, owned so the
@@ -234,6 +245,16 @@ mod tests {
     #[test]
     fn a_conforming_svid_is_accepted() {
         assert!(svid_id_allowed(&conforming(EXPECTED), &[Arc::from(EXPECTED)]));
+    }
+
+    #[test]
+    fn svid_id_matches_the_pinned_id_and_rejects_another() {
+        let der = conforming(EXPECTED);
+        assert!(svid_id_matches(&der, EXPECTED), "the pinned id matches");
+        assert!(
+            !svid_id_matches(&der, "spiffe://grid.internal/other"),
+            "a different id does not match"
+        );
     }
 
     #[test]
