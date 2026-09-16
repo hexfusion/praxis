@@ -24,6 +24,7 @@ arc-swap = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
 rustls = { workspace = true }
 serde = { workspace = true }
+spiffe = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt"], optional = true }
 tracing = { workspace = true }

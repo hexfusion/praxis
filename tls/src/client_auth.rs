@@ -22,7 +22,7 @@ use rustls::{
     },
 };
 
-use crate::{ClientCertMode, TlsError};
+use crate::{ClientCertMode, TlsError, spiffe::is_valid_svid_leaf};
 
 // -----------------------------------------------------------------------------
 // Verifier Builder
@@ -88,7 +88,6 @@ pub(crate) fn build_client_verifier(
     }
 }
 
-
 // -----------------------------------------------------------------------------
 // NamedPeerVerifier
 // -----------------------------------------------------------------------------
@@ -105,36 +104,6 @@ struct NamedPeerVerifier {
     inner: Arc<dyn ClientCertVerifier>,
 }
 
-/// Return the single URI SAN in a DER-encoded certificate.
-fn single_uri_san(cert: &CertificateDer<'_>) -> Option<String> {
-    use x509_parser::{
-        extensions::GeneralName,
-        prelude::{FromDer as _, X509Certificate},
-    };
-
-    let (_, parsed) = X509Certificate::from_der(cert.as_ref()).ok()?;
-    let san = parsed.subject_alternative_name().ok().flatten()?;
-
-    let mut uris = san.value.general_names.iter().filter_map(|name| match name {
-        GeneralName::URI(uri) => Some((*uri).to_owned()),
-        GeneralName::OtherName(..)
-        | GeneralName::RFC822Name(_)
-        | GeneralName::DNSName(_)
-        | GeneralName::X400Address(_)
-        | GeneralName::DirectoryName(_)
-        | GeneralName::EDIPartyName(_)
-        | GeneralName::IPAddress(_)
-        | GeneralName::RegisteredID(_) => None,
-    });
-
-    // Exactly one, so a certificate holding several names names nobody.
-    let only = uris.next()?;
-    if uris.next().is_some() {
-        return None;
-    }
-    Some(only)
-}
-
 impl ClientCertVerifier for NamedPeerVerifier {
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
         self.inner.root_hint_subjects()
@@ -148,11 +117,12 @@ impl ClientCertVerifier for NamedPeerVerifier {
     ) -> Result<ClientCertVerified, rustls::Error> {
         let verified = self.inner.verify_client_cert(end_entity, intermediates, now)?;
 
-        match single_uri_san(end_entity) {
-            Some(id) if id.starts_with("spiffe://") && id.len() > "spiffe://".len() => Ok(verified),
-            _ => Err(rustls::Error::General(
-                "client certificate must carry exactly one spiffe:// URI SAN".to_owned(),
-            )),
+        if is_valid_svid_leaf(end_entity.as_ref()) {
+            Ok(verified)
+        } else {
+            Err(rustls::Error::General(
+                "client certificate is not a valid X.509-SVID leaf".to_owned(),
+            ))
         }
     }
 
@@ -217,6 +187,35 @@ fn load_crls(paths: &[String]) -> Result<Vec<CertificateRevocationListDer<'stati
     Ok(crls)
 }
 
+/// Build a [`RootCertStore`] from a PEM bundle.
+///
+/// Returns an error detail string the caller maps to its own [`TlsError`]
+/// variant, so the same bytes-to-store logic serves both a file-loading listener
+/// and an in-memory client config.
+///
+/// # Errors
+///
+/// Returns a detail string when the PEM is malformed, contains no certificates,
+/// or a certificate is rejected as a trust anchor.
+///
+/// [`RootCertStore`]: rustls::RootCertStore
+pub(crate) fn roots_from_pem(pem: &[u8]) -> Result<RootCertStore, String> {
+    let certs: Vec<_> = CertificateDer::pem_slice_iter(pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to parse PEM: {e}"))?;
+    if certs.is_empty() {
+        return Err("no certificates found in PEM".to_owned());
+    }
+
+    let mut root_store = RootCertStore::empty();
+    for cert in certs {
+        root_store
+            .add(cert)
+            .map_err(|e| format!("failed to add CA cert: {e}"))?;
+    }
+    Ok(root_store)
+}
+
 /// Load CA certificates from a PEM file into a [`RootCertStore`].
 ///
 /// [`RootCertStore`]: rustls::RootCertStore
@@ -225,30 +224,10 @@ fn load_ca_root_store(ca_path: &str) -> Result<RootCertStore, TlsError> {
         path: ca_path.to_owned(),
         detail: e.to_string(),
     })?);
-
-    let certs: Vec<_> = CertificateDer::pem_slice_iter(&ca_pem)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| TlsError::FileLoadError {
-            path: ca_path.to_owned(),
-            detail: format!("failed to parse PEM: {e}"),
-        })?;
-
-    if certs.is_empty() {
-        return Err(TlsError::FileLoadError {
-            path: ca_path.to_owned(),
-            detail: "no certificates found in PEM file".to_owned(),
-        });
-    }
-
-    let mut root_store = RootCertStore::empty();
-    for cert in certs {
-        root_store.add(cert).map_err(|e| TlsError::FileLoadError {
-            path: ca_path.to_owned(),
-            detail: format!("failed to add CA cert: {e}"),
-        })?;
-    }
-
-    Ok(root_store)
+    roots_from_pem(&ca_pem).map_err(|detail| TlsError::FileLoadError {
+        path: ca_path.to_owned(),
+        detail,
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -447,62 +426,6 @@ mod tests {
     }
 
     // ---- NamedPeerVerifier ----
-
-    /// Build a leaf signed by a throwaway CA, carrying the given URI SANs.
-    fn leaf_with_uri_sans(uris: &[&str]) -> Vec<u8> {
-        use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair, SanType};
-
-        let ca_key = KeyPair::generate().expect("CA key");
-        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
-        ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        ca_params.distinguished_name.push(DnType::CommonName, "Named Test CA");
-        let issuer = Issuer::new(ca_params, &ca_key);
-
-        let leaf_key = KeyPair::generate().expect("leaf key");
-        let mut leaf_params = CertificateParams::new(Vec::<String>::new()).expect("leaf params");
-        leaf_params.distinguished_name.push(DnType::CommonName, "peer");
-        for uri in uris {
-            leaf_params
-                .subject_alt_names
-                .push(SanType::URI((*uri).try_into().expect("URI SAN")));
-        }
-        leaf_params
-            .signed_by(&leaf_key, &issuer)
-            .expect("leaf sign")
-            .der()
-            .to_vec()
-    }
-
-    #[test]
-    fn single_uri_san_returns_the_only_name() {
-        let der = leaf_with_uri_sans(&["spiffe://grid.internal/site/pool-a"]);
-        let cert = CertificateDer::from(der);
-        assert_eq!(
-            single_uri_san(&cert).as_deref(),
-            Some("spiffe://grid.internal/site/pool-a")
-        );
-    }
-
-    #[test]
-    fn single_uri_san_refuses_two_names() {
-        let der = leaf_with_uri_sans(&[
-            "spiffe://grid.internal/site/pool-a",
-            "spiffe://grid.internal/site/pool-b",
-        ]);
-        let cert = CertificateDer::from(der);
-        assert_eq!(
-            single_uri_san(&cert),
-            None,
-            "a certificate holding two names must name nobody"
-        );
-    }
-
-    #[test]
-    fn single_uri_san_is_none_without_a_uri_san() {
-        let der = leaf_with_uri_sans(&[]);
-        let cert = CertificateDer::from(der);
-        assert_eq!(single_uri_san(&cert), None);
-    }
 
     #[test]
     fn require_named_mode_mandates_client_auth() {
