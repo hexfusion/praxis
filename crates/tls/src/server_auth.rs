@@ -341,6 +341,18 @@ mod tests {
         (ca_pem, leaf_der, key)
     }
 
+    #[test]
+    fn a_noncanonical_pin_is_rejected_at_build_time() {
+        // SPIFFE trust domains are canonically lowercase, so an uppercase pin would
+        // never match a conforming SVID: it is a config error up front.
+        let (ca_pem, _leaf, _key) = mint_serving("Grid CA", "spiffe://grid.internal/signals");
+        let err = pinned_client_config(provider(), &ca_pem, "spiffe://GRID.INTERNAL/signals", None);
+        assert!(
+            matches!(err, Err(TlsError::ClientConfigError { .. })),
+            "a noncanonical trust-domain pin is a config error"
+        );
+    }
+
     /// Mint a CA (as PEM), the leaf certificate PEM, and the combined
     /// certificate-and-key identity PEM a client can present as its own identity.
     fn mint_identity_pem(ca_cn: &str, leaf_uri: &str) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
