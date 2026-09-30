@@ -198,6 +198,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [sticky-sessions.yaml](configs/traffic-management/sticky-sessions.yaml) | Pins clients to a specific backend across requests |
 | [subset-lb.yaml](configs/traffic-management/subset-lb.yaml) | Filters endpoints by metadata labels and applies an inner strategy within the matching subset |
 | [timeout.yaml](configs/traffic-management/timeout.yaml) | Returns 504 if the upstream takes longer than timeout_ms to respond |
+| [trusted-private-endpoints.yaml](configs/traffic-management/trusted-private-endpoints.yaml) | Lets one hostname endpoint resolve into private space, such as a Kubernetes Service name resolving to its ClusterIP |
 | [weighted-load-balancing.yaml](configs/traffic-management/weighted-load-balancing.yaml) | Traffic split proportional to per-endpoint weights |
 | [zone-aware.yaml](configs/traffic-management/zone-aware.yaml) | Prefers same-zone endpoints to reduce cross-zone network costs and latency |
 
