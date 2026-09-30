@@ -11,6 +11,7 @@ mod network;
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 pub mod peer;
 mod target;
+mod trusted_private;
 mod upstream;
 
 pub(crate) use classification::classify_without_nat64;
@@ -20,4 +21,6 @@ pub use network::{CidrRange, is_private_ip, normalize_mapped_ipv4};
 pub use target::{
     InvalidTarget, PreparedSubrequest, PreparedTarget, UrlTargetError, prepare_url_target, validate_url_target,
 };
+pub(crate) use trusted_private::strip_root_dot;
+pub use trusted_private::validate_trusted_private_endpoints;
 pub use upstream::Upstream;
