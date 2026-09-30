@@ -775,7 +775,8 @@ probe uses only a cluster's `endpoints` and its
 `health_check` block, and HTTP/TCP probes connect in
 plaintext, so a top-level cluster's data-path settings
 (`tls`, `retry_policy`, the timeout fields,
-`load_balancer_strategy`) have no effect at all. Configure
+`load_balancer_strategy`, `trusted_private_endpoints`)
+have no effect at all. Configure
 those on the inline load-balancer cluster instead.
 
 ## Failure Mode

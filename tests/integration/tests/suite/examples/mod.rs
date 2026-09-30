@@ -105,6 +105,7 @@ mod trace_context;
 #[cfg(feature = "otel")]
 mod tracing_otlp;
 mod traffic_management_examples;
+mod trusted_private_endpoints;
 mod upstream_requests_total;
 mod url_rewriting;
 mod virtual_hosts;
