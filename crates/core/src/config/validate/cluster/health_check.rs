@@ -9,7 +9,7 @@ use tracing::warn;
 
 use crate::{
     config::{Cluster, HealthCheckType, InsecureOptions},
-    connectivity::{classify_without_nat64, normalize_mapped_ipv4},
+    connectivity::{classify_without_nat64, normalize_mapped_ipv4, strip_root_dot},
     errors::ProxyError,
 };
 
@@ -204,6 +204,9 @@ pub(super) fn validate_health_check_ssrf(
     for ep in &cluster.endpoints {
         let addr_str = ep.address();
         let host = extract_host(addr_str);
+        if is_trusted_cluster_dns_name(cluster, host) {
+            continue;
+        }
         check_ssrf_host(
             host,
             &cluster.name,
@@ -283,11 +286,27 @@ pub fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
 /// SSRF-sensitive addresses (loopback, cloud metadata) or
 /// alternate IP representations (decimal, hex, octal).
 pub(super) fn is_ssrf_sensitive_hostname(host: &str) -> bool {
+    let host = strip_root_dot(host);
     if let Some(ip) = try_parse_alternate_ip(host) {
         return is_ssrf_sensitive(&normalize_mapped_ipv4(ip));
     }
+    host.eq_ignore_ascii_case("localhost") || is_cluster_dns_name(host)
+}
+
+/// Whether `host` is listed and trips only the name rules, never localhost or an IP spelling.
+pub(super) fn is_trusted_cluster_dns_name(cluster: &Cluster, host: &str) -> bool {
+    let host = strip_root_dot(host);
+    is_cluster_dns_name(host)
+        && cluster
+            .trusted_private_endpoints
+            .iter()
+            .any(|entry| strip_root_dot(entry).eq_ignore_ascii_case(host))
+}
+
+/// Whether `host` trips the `.local`, `.internal`, or `metadata.` name rules.
+fn is_cluster_dns_name(host: &str) -> bool {
     let lower = host.to_ascii_lowercase();
-    lower == "localhost" || lower.ends_with(".internal") || lower.ends_with(".local") || lower.starts_with("metadata.")
+    lower.ends_with(".local") || lower.ends_with(".internal") || lower.starts_with("metadata.")
 }
 
 /// Attempt to parse a host as an IPv4 address in an alternate
@@ -915,6 +934,39 @@ clusters:
     }
 
     #[test]
+    fn listed_hosts_skip_the_health_check_name_check() {
+        // (endpoint, listed entry, accepted)
+        let cases = [
+            ("x.ns.svc.cluster.local:8000", Some("x.ns.svc.cluster.local"), true),
+            ("x.ns.svc.cluster.local.:8000", Some("x.ns.svc.cluster.local"), true),
+            ("x.ns.svc.cluster.local:8000", None, false),
+            ("x.ns.svc.cluster.local.:8000", None, false),
+            ("metadata.google.internal.:80", None, false),
+            ("localhost:8000", Some("localhost"), false),
+        ];
+        for (endpoint, entry, accepted) in cases {
+            let mut cluster = Cluster {
+                health_check: Some(crate::config::HealthCheckConfig {
+                    check_type: crate::config::HealthCheckType::Tcp,
+                    expected_status: 200,
+                    grpc_service: String::new(),
+                    healthy_threshold: 2,
+                    interval_ms: 5000,
+                    passive_healthy_threshold: None,
+                    passive_unhealthy_threshold: None,
+                    path: "/health".to_owned(),
+                    timeout_ms: 2000,
+                    unhealthy_threshold: 3,
+                }),
+                ..Cluster::with_defaults("web", vec![endpoint.into()])
+            };
+            cluster.trusted_private_endpoints = entry.map(str::to_owned).into_iter().collect();
+            let result = validate_clusters(&[cluster], &InsecureOptions::default());
+            assert_eq!(result.is_ok(), accepted, "{endpoint} listed as {entry:?}: {result:?}");
+        }
+    }
+
+    #[test]
     fn ssrf_check_passes_for_rfc1918() {
         let clusters = vec![Cluster {
             health_check: Some(crate::config::HealthCheckConfig {
@@ -1315,6 +1367,18 @@ clusters:
             super::is_ssrf_sensitive_hostname("metadata.example.com"),
             "metadata.* should be flagged"
         );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_hostname_flags_root_dot_forms() {
+        for host in [
+            "x.svc.cluster.local.",
+            "metadata.google.internal.",
+            "LOCALHOST.",
+            "127.1.",
+        ] {
+            assert!(super::is_ssrf_sensitive_hostname(host), "{host} should be flagged");
+        }
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use std::{
     io::{Read as _, Write as _},
-    net::TcpStream,
+    net::{IpAddr, Ipv4Addr, TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -300,6 +300,9 @@ pub struct BackendGuard {
     /// The port the backend is listening on.
     port: u16,
 
+    /// The address the backend is listening on.
+    ip: IpAddr,
+
     /// Shared flag signalling the listener loop to exit.
     shutdown: Arc<AtomicBool>,
 }
@@ -314,7 +317,7 @@ impl BackendGuard {
 impl Drop for BackendGuard {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        _ = TcpStream::connect(format!("127.0.0.1:{}", self.port));
+        _ = TcpStream::connect((self.ip, self.port));
     }
 }
 
@@ -323,6 +326,26 @@ impl Drop for BackendGuard {
 /// is dropped.
 pub(crate) fn spawn_tcp_server_with_shutdown(handler: impl Fn(TcpStream) + Send + Clone + 'static) -> BackendGuard {
     let (listener, port) = crate::net::port::bind_unique_port();
+    serve_with_shutdown(listener, IpAddr::V4(Ipv4Addr::LOCALHOST), port, handler)
+}
+
+/// Like [`spawn_tcp_server_with_shutdown`], listening on `ip`.
+pub(crate) fn spawn_tcp_server_on_with_shutdown(
+    ip: IpAddr,
+    handler: impl Fn(TcpStream) + Send + Clone + 'static,
+) -> BackendGuard {
+    let listener = TcpListener::bind((ip, 0)).expect("bind backend");
+    let port = listener.local_addr().expect("backend address").port();
+    serve_with_shutdown(listener, ip, port, handler)
+}
+
+/// Accept on `listener` until the returned guard drops.
+fn serve_with_shutdown(
+    listener: TcpListener,
+    ip: IpAddr,
+    port: u16,
+    handler: impl Fn(TcpStream) + Send + Clone + 'static,
+) -> BackendGuard {
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
 
@@ -336,7 +359,7 @@ pub(crate) fn spawn_tcp_server_with_shutdown(handler: impl Fn(TcpStream) + Send 
         }
     });
 
-    BackendGuard { port, shutdown }
+    BackendGuard { port, ip, shutdown }
 }
 
 /// Read from a TCP stream until the HTTP header terminator
