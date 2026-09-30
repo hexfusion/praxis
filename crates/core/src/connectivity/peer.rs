@@ -18,7 +18,10 @@ use std::{
 use dashmap::DashMap;
 use pingora_core::{protocols::ALPN, upstreams::peer::HttpPeer};
 
-use super::ConnectionOptions;
+use super::{
+    ConnectionOptions,
+    trusted_private::{is_trusted_host, trusted_host_may_reach},
+};
 use crate::config::UpstreamHttpVersion;
 
 /// TTL for cached DNS entries.
@@ -94,6 +97,18 @@ pub enum AddressResolutionError {
         /// The private or reserved address DNS returned.
         ip: IpAddr,
     },
+
+    /// A trusted host resolved outside RFC 1918 and unique-local space.
+    #[error(
+        "upstream address '{address}' is in trusted_private_endpoints but resolved to {ip}, \
+         outside RFC 1918 and unique-local space"
+    )]
+    UntrustedRange {
+        /// Hostname being resolved.
+        address: String,
+        /// The address DNS returned.
+        ip: IpAddr,
+    },
 }
 
 impl AddressResolutionError {
@@ -121,7 +136,11 @@ impl AddressResolutionError {
                 matches!(source.raw_os_error(), Some(EMFILE | ENFILE))
                     || source.kind() == std::io::ErrorKind::OutOfMemory
             },
-            Self::Task { .. } | Self::Empty(_) | Self::RecentFailure { .. } | Self::PrivateAddress { .. } => false,
+            Self::Task { .. }
+            | Self::Empty(_)
+            | Self::RecentFailure { .. }
+            | Self::PrivateAddress { .. }
+            | Self::UntrustedRange { .. } => false,
         }
     }
 }
@@ -248,6 +267,10 @@ fn owned_from_arc(err: &AddressResolutionError) -> AddressResolutionError {
             address: address.clone(),
             ip: *ip,
         },
+        AddressResolutionError::UntrustedRange { address, ip } => AddressResolutionError::UntrustedRange {
+            address: address.clone(),
+            ip: *ip,
+        },
     }
 }
 
@@ -322,7 +345,9 @@ fn readdress(err: AddressResolutionError, caller: &str) -> AddressResolutionErro
             address: caller.to_owned(),
             message,
         },
-        other @ AddressResolutionError::PrivateAddress { .. } => other,
+        other @ (AddressResolutionError::PrivateAddress { .. } | AddressResolutionError::UntrustedRange { .. }) => {
+            other
+        },
     }
 }
 
@@ -506,25 +531,68 @@ async fn owner_resolve<L: BlockingLookup>(
 ///     });
 /// ```
 pub async fn resolve_address_checked(address: &str, allow_private: bool) -> Result<SocketAddr, AddressResolutionError> {
+    resolve_checked(address, allow_private, &[]).await
+}
+
+/// [`resolve_address_checked`] honouring the upstream's `trusted_private_endpoints`.
+///
+/// # Errors
+///
+/// As [`resolve_address_checked`], plus [`AddressResolutionError::UntrustedRange`].
+pub async fn resolve_upstream_checked(
+    upstream: &crate::connectivity::Upstream,
+    allow_private: bool,
+) -> Result<SocketAddr, AddressResolutionError> {
+    resolve_checked(
+        &upstream.address,
+        allow_private,
+        &upstream.connection.trusted_private_endpoints,
+    )
+    .await
+}
+
+/// Resolve `address`, refusing a private answer unless allowed or trusted.
+async fn resolve_checked(
+    address: &str,
+    allow_private: bool,
+    trusted: &[Box<str>],
+) -> Result<SocketAddr, AddressResolutionError> {
     if let Some(literal) = literal_socket_addr(address) {
         return Ok(literal);
     }
 
     let resolved = resolve_address(address).await?;
     let ip = resolved.ip();
-    if !allow_private && crate::connectivity::is_private_ip(&ip) {
+    if allow_private || !crate::connectivity::is_private_ip(&ip) {
+        return Ok(resolved);
+    }
+    let listed =
+        !trusted.is_empty() && split_host_port(address).is_some_and(|(host, _)| is_trusted_host(trusted, host));
+    if listed && trusted_host_may_reach(&ip) {
+        return Ok(resolved);
+    }
+    Err(refuse_private(address, ip, listed))
+}
+
+/// Log and build the refusal for a private answer.
+fn refuse_private(address: &str, ip: IpAddr, listed: bool) -> AddressResolutionError {
+    let address = address.to_owned();
+    if listed {
+        tracing::warn!(
+            upstream = %address,
+            resolved_ip = %ip,
+            "trusted upstream hostname resolved outside RFC 1918 and unique-local space"
+        );
+        AddressResolutionError::UntrustedRange { address, ip }
+    } else {
         tracing::warn!(
             upstream = %address,
             resolved_ip = %ip,
             "upstream hostname resolved to private/reserved IP address; \
              set insecure_options.allow_private_upstreams to allow"
         );
-        return Err(AddressResolutionError::PrivateAddress {
-            address: address.to_owned(),
-            ip,
-        });
+        AddressResolutionError::PrivateAddress { address, ip }
     }
-    Ok(resolved)
 }
 
 /// Parse `address` as a literal `host:port` socket address, if it is one.
@@ -771,6 +839,237 @@ mod tests {
     #[tokio::test]
     async fn resolve_address_rejects_missing_port() {
         resolve_address("127.0.0.1").await.unwrap_err();
+    }
+
+    /// An upstream built through the load balancer's `Cluster` to options path.
+    fn upstream_in_cluster(address: &str, trusted: &[&str]) -> crate::connectivity::Upstream {
+        let mut cluster = crate::config::Cluster::with_defaults("models", vec![address.into()]);
+        cluster.trusted_private_endpoints = trusted.iter().map(|host| (*host).to_owned()).collect();
+        crate::connectivity::Upstream {
+            address: Arc::from(address),
+            authority: None,
+            connection: Arc::new(ConnectionOptions::from(&cluster)),
+            tls: None,
+        }
+    }
+
+    /// Expected resolution outcome.
+    enum Want {
+        Admit,
+        Unlisted,
+        OutOfRange,
+    }
+
+    /// One row of the trusted-private resolution table.
+    struct TrustCase {
+        name: &'static str,
+        host: &'static str,
+        answer: &'static str,
+        trusted: &'static [&'static str],
+        allow_private: bool,
+        want: Want,
+    }
+
+    const SVC: &str = "model.tenant-1306.svc";
+
+    const TRUST_CASES: &[TrustCase] = &[
+        TrustCase {
+            name: "listed service to its ClusterIP",
+            host: SVC,
+            answer: "172.30.202.42",
+            trusted: &[SVC],
+            allow_private: false,
+            want: Want::Admit,
+        },
+        TrustCase {
+            name: "match is case-insensitive",
+            host: SVC,
+            answer: "172.30.202.42",
+            trusted: &["Model.Tenant-1306.SVC"],
+            allow_private: false,
+            want: Want::Admit,
+        },
+        TrustCase {
+            name: "trailing dot on the entry",
+            host: SVC,
+            answer: "172.30.202.42",
+            trusted: &["model.tenant-1306.svc."],
+            allow_private: false,
+            want: Want::Admit,
+        },
+        TrustCase {
+            name: "listed host to 10/8",
+            host: "a.p1306.invalid",
+            answer: "10.96.0.10",
+            trusted: &["a.p1306.invalid"],
+            allow_private: false,
+            want: Want::Admit,
+        },
+        TrustCase {
+            name: "listed host to 192.168/16",
+            host: "b.p1306.invalid",
+            answer: "192.168.4.2",
+            trusted: &["b.p1306.invalid"],
+            allow_private: false,
+            want: Want::Admit,
+        },
+        TrustCase {
+            name: "listed host to unique local",
+            host: "c.p1306.invalid",
+            answer: "fd12:3456::1",
+            trusted: &["c.p1306.invalid"],
+            allow_private: false,
+            want: Want::Admit,
+        },
+        TrustCase {
+            name: "public answer needs no listing",
+            host: "d.p1306.invalid",
+            answer: "8.8.8.8",
+            trusted: &[],
+            allow_private: false,
+            want: Want::Admit,
+        },
+        TrustCase {
+            name: "unlisted host, same cluster",
+            host: "other.tenant-1306.svc",
+            answer: "10.96.0.20",
+            trusted: &[SVC],
+            allow_private: false,
+            want: Want::Unlisted,
+        },
+        TrustCase {
+            name: "same host, other cluster",
+            host: SVC,
+            answer: "172.30.202.42",
+            trusted: &[],
+            allow_private: false,
+            want: Want::Unlisted,
+        },
+        TrustCase {
+            name: "a suffix is not a match",
+            host: "x.model.tenant-1306.svc",
+            answer: "10.96.0.30",
+            trusted: &[SVC],
+            allow_private: false,
+            want: Want::Unlisted,
+        },
+        TrustCase {
+            name: "listed host to loopback",
+            host: "e.p1306.invalid",
+            answer: "127.0.0.1",
+            trusted: &["e.p1306.invalid"],
+            allow_private: false,
+            want: Want::OutOfRange,
+        },
+        TrustCase {
+            name: "listed host to IPv6 loopback",
+            host: "f.p1306.invalid",
+            answer: "::1",
+            trusted: &["f.p1306.invalid"],
+            allow_private: false,
+            want: Want::OutOfRange,
+        },
+        TrustCase {
+            name: "listed host to metadata",
+            host: "g.p1306.invalid",
+            answer: "169.254.169.254",
+            trusted: &["g.p1306.invalid"],
+            allow_private: false,
+            want: Want::OutOfRange,
+        },
+        TrustCase {
+            name: "listed host to link-local",
+            host: "h.p1306.invalid",
+            answer: "169.254.3.4",
+            trusted: &["h.p1306.invalid"],
+            allow_private: false,
+            want: Want::OutOfRange,
+        },
+        TrustCase {
+            name: "listed host to metadata in ULA",
+            host: "i.p1306.invalid",
+            answer: "fd00:ec2::254",
+            trusted: &["i.p1306.invalid"],
+            allow_private: false,
+            want: Want::OutOfRange,
+        },
+        TrustCase {
+            name: "listed host to shared space",
+            host: "j.p1306.invalid",
+            answer: "100.64.0.5",
+            trusted: &["j.p1306.invalid"],
+            allow_private: false,
+            want: Want::OutOfRange,
+        },
+        TrustCase {
+            name: "listed host to unspecified",
+            host: "k.p1306.invalid",
+            answer: "0.0.0.0",
+            trusted: &["k.p1306.invalid"],
+            allow_private: false,
+            want: Want::OutOfRange,
+        },
+        TrustCase {
+            name: "global flag still admits unlisted",
+            host: "l.p1306.invalid",
+            answer: "10.96.0.40",
+            trusted: &[],
+            allow_private: true,
+            want: Want::Admit,
+        },
+        TrustCase {
+            name: "global flag still admits loopback",
+            host: "m.p1306.invalid",
+            answer: "127.0.0.1",
+            trusted: &[],
+            allow_private: true,
+            want: Want::Admit,
+        },
+    ];
+
+    #[tokio::test]
+    async fn trusted_private_endpoints_relax_only_listed_hosts_to_rfc1918_and_ula() {
+        for case in TRUST_CASES {
+            let answer: IpAddr = case.answer.parse().unwrap();
+            insert_cached(case.host, Ok(Arc::from([answer].as_slice())));
+            let upstream = upstream_in_cluster(&format!("{}:8000", case.host), case.trusted);
+            let got = resolve_upstream_checked(&upstream, case.allow_private).await;
+            match case.want {
+                Want::Admit => assert_eq!(
+                    got.as_ref().map(SocketAddr::ip).ok(),
+                    Some(answer),
+                    "{}: {got:?}",
+                    case.name
+                ),
+                Want::Unlisted => assert!(
+                    matches!(got, Err(AddressResolutionError::PrivateAddress { .. })),
+                    "{}: {got:?}",
+                    case.name
+                ),
+                Want::OutOfRange => assert!(
+                    matches!(got, Err(AddressResolutionError::UntrustedRange { .. })),
+                    "{}: {got:?}",
+                    case.name
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_address_level_check_trusts_no_host() {
+        let host = "n.p1306.invalid";
+        insert_cached(
+            host,
+            Ok(Arc::from(["10.96.0.50".parse::<IpAddr>().unwrap()].as_slice())),
+        );
+        let err = resolve_address_checked(&format!("{host}:8000"), false)
+            .await
+            .expect_err("no cluster, so a private answer is refused");
+        assert!(
+            err.to_string()
+                .contains("set insecure_options.allow_private_upstreams to allow"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
