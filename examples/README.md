@@ -183,6 +183,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [canary-routing.yaml](configs/traffic-management/canary-routing.yaml) | Sends ~10% of traffic to a canary backend while the stable backend handles the remaining ~90% |
 | [circuit-breaker.yaml](configs/traffic-management/circuit-breaker.yaml) | Prevents cascading failures by tracking consecutive upstream errors per cluster |
 | [cluster-application-metadata.yaml](configs/traffic-management/cluster-application-metadata.yaml) | Tags an upstream cluster with opaque application metadata that consuming filters interpret |
+| [cluster-base-path.yaml](configs/traffic-management/cluster-base-path.yaml) | Prepends a path to the upstream request for the cluster the load balancer selected, so one gateway can front several upstreams that each serve the same API under their own prefix |
 | [endpoint-selector.yaml](configs/traffic-management/endpoint-selector.yaml) | Selects an upstream endpoint from a trusted mutation source (e.g. external processing) |
 | [grpc-detection.yaml](configs/traffic-management/grpc-detection.yaml) | Detects gRPC requests from the content-type header and promotes the variant to filter metadata and results |
 | [grpc-timeout.yaml](configs/traffic-management/grpc-timeout.yaml) | Honours the `grpc-timeout` request header as a real deadline |

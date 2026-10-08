@@ -453,6 +453,7 @@ impl ProxyHttp for PingoraHttpHandler {
         upstream_request.strip_reserved_internal();
         upstream_request::apply_authority_override(upstream_request, ctx)?;
         upstream_request::apply_rewritten_path(upstream_request, ctx)?;
+        upstream_request::apply_base_path(upstream_request, ctx)?;
         upstream_request::apply_mutated_content_length(upstream_request, ctx);
         // Runs once per attempt: on a retry, re-seed the retained mutated body
         // so the replayed bytes match the re-stamped Content-Length above (a

@@ -912,6 +912,7 @@ mod tests {
         crate::connectivity::Upstream {
             address: Arc::from(address),
             authority: None,
+            base_path: None,
             connection: Arc::new(ConnectionOptions::from(&cluster)),
             tls: None,
         }

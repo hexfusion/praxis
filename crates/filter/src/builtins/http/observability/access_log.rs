@@ -2950,6 +2950,7 @@ conditions:
         ctx.upstream = Some(Upstream {
             address: Arc::from("10.0.0.2:8080"),
             authority: None,
+            base_path: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
         });
