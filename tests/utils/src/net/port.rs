@@ -5,7 +5,7 @@
 
 use std::{
     collections::HashSet,
-    net::TcpListener,
+    net::{IpAddr, Ipv4Addr, TcpListener},
     sync::{LazyLock, Mutex, PoisonError},
 };
 
@@ -20,15 +20,25 @@ static ALLOCATED_PORTS: LazyLock<Mutex<HashSet<u16>>> = LazyLock::new(|| Mutex::
 // Port Allocation
 // -----------------------------------------------------------------------------
 
-/// Bind to an OS-assigned port that is not already in the
+/// Bind to an OS-assigned port on IPv4 loopback that is not already in the
 /// process-wide allocation set, then register it.
 ///
 /// # Panics
 ///
 /// Panics if a unique port cannot be bound after 256 attempts.
 pub fn bind_unique_port() -> (TcpListener, u16) {
+    bind_unique_port_on(IpAddr::V4(Ipv4Addr::LOCALHOST))
+}
+
+/// Like [`bind_unique_port`] but on `ip`, for a backend that must answer on
+/// a specific local address.
+///
+/// # Panics
+///
+/// Panics if a unique port cannot be bound after 256 attempts.
+pub fn bind_unique_port_on(ip: IpAddr) -> (TcpListener, u16) {
     for _ in 0..256 {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = TcpListener::bind((ip, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         if ALLOCATED_PORTS
             .lock()
@@ -38,7 +48,7 @@ pub fn bind_unique_port() -> (TcpListener, u16) {
             return (listener, port);
         }
     }
-    panic!("failed to bind a unique port after 256 attempts");
+    panic!("failed to bind a unique port on {ip} after 256 attempts");
 }
 
 /// A held port that keeps its [`TcpListener`] open until dropped or released.
